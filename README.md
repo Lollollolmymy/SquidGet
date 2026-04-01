@@ -112,7 +112,7 @@ out_dir=/path/to/your/music/folder
 - **thread.h**: Cross-platform threading and mutex abstractions
 - **tui.c**: Terminal user interface rendering and input handling
 - **Makefile**: Build script for GCC/Clang compilation
-- **README.txt**: This documentation file
+- **README.md**: This documentation file
 - **run.sh**: Automated build and launch script for macOS/Linux
 - **squidget.bat**: Automated build and launch script for Windows
 - **tcc/**: Tiny C Compiler distribution for Windows builds
