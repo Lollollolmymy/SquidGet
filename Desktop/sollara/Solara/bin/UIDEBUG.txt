@@ -1,4 +1,0 @@
-﻿[2026-03-08 22:30:54]: Created new exit signal.
-[2026-03-08 22:31:09]: Aborting save for Nanocore V2 _ A Universal Time: WebView likely not loaded.
-[2026-03-08 22:31:20]: Aborting save for Farm GUI: WebView likely not loaded.
-[2026-03-08 22:31:25]: Aborting save for A Universal Time Script _ 10 + Features _ OP _ 2022: WebView likely not loaded.
