@@ -99,6 +99,24 @@ out_dir=/path/to/your/music/folder
 
 ---
 
+## File Descriptions
+
+- **api.c**: Handles HTTP requests to the Spotify download API using WinHTTP (Windows) or libcurl (Unix)
+- **config.c**: Manages persistent configuration storage for output directories
+- **download.c**: Core download logic, including manifest parsing, quality selection, and file writing
+- **json.c**: Lightweight JSON parser for API responses
+- **json.h**: Header for JSON parsing functions
+- **main.c**: Application entry point, TUI event loop, and directory resolution
+- **platform.c**: Cross-platform GUI folder picker for setup
+- **squidget.h**: Main header with structs, constants, and function declarations
+- **thread.h**: Cross-platform threading and mutex abstractions
+- **tui.c**: Terminal user interface rendering and input handling
+- **Makefile**: Build script for GCC/Clang compilation
+- **README.txt**: This documentation file
+- **run.sh**: Automated build and launch script for macOS/Linux
+- **squidget.bat**: Automated build and launch script for Windows
+- **tcc/**: Tiny C Compiler distribution for Windows builds
+
 ## License
 
 MIT — see source code for details.
