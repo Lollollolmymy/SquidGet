@@ -1,7 +1,6 @@
-#pragma once
-
 #ifndef _WIN32
 #  define _DEFAULT_SOURCE   /* exposes usleep, strdup, etc. on glibc */
+#  include <time.h>         /* nanosleep */
 #endif
 
 #ifdef _WIN32
@@ -16,7 +15,11 @@ static inline int sqt_thread_create(sqt_thread_t *t,
     *t = CreateThread(NULL, 0, fn, arg, 0, NULL);
     return *t ? 0 : -1;
 }
-#  define sqt_thread_join(t)    do { WaitForSingleObject(t, INFINITE); CloseHandle(t); } while(0)
+static inline void sqt_thread_join_impl(sqt_thread_t t) {
+    WaitForSingleObject(t, INFINITE);
+    CloseHandle(t);
+}
+#  define sqt_thread_join(t)    sqt_thread_join_impl(t)
 #  define sqt_mutex_init(m)     InitializeCriticalSection(m)
 #  define sqt_mutex_destroy(m)  DeleteCriticalSection(m)
 #  define sqt_mutex_lock(m)     EnterCriticalSection(m)
@@ -37,5 +40,12 @@ typedef pthread_mutex_t  sqt_mutex_t;
 #  define sqt_mutex_destroy(m)          pthread_mutex_destroy(m)
 #  define sqt_mutex_lock(m)             pthread_mutex_lock(m)
 #  define sqt_mutex_unlock(m)           pthread_mutex_unlock(m)
-#  define sqt_sleep_ms(ms)              usleep((unsigned)((ms) * 1000))
+/* nanosleep; usleep can't handle > 1000ms */
+static inline void sqt_sleep_ms_impl(unsigned ms) {
+    struct timespec ts;
+    ts.tv_sec = ms / 1000;
+    ts.tv_nsec = (ms % 1000) * 1000000;
+    nanosleep(&ts, NULL);
+}
+#  define sqt_sleep_ms(ms)              sqt_sleep_ms_impl(ms)
 #endif

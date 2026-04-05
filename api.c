@@ -118,7 +118,7 @@ long http_get_file(const char *url, const char *path) {
 static void urlencode(const char *in, char *out, size_t outsz) {
     static const char hex[] = "0123456789ABCDEF";
     size_t j = 0;
-    for (const unsigned char *p = (const unsigned char *)in; *p && j + 4 < outsz; p++) {
+    for (const unsigned char *p = (const unsigned char *)in; *p && j + 3 < outsz; p++) {
         if ((*p>='A'&&*p<='Z')||(*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')
             ||*p=='-'||*p=='_'||*p=='.'||*p=='~') {
             out[j++] = (char)*p;
@@ -185,7 +185,7 @@ char *http_get(const char *url) {
 }
 
 long http_get_file(const char *url, const char *path) {
-    char esc_url[4096], esc_path[2048];
+    char esc_url[4096], esc_path[4096];
     shell_escape(url,  esc_url,  sizeof esc_url);
     shell_escape(path, esc_path, sizeof esc_path);
     char cmd[8192];

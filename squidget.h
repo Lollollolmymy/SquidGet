@@ -55,7 +55,7 @@ typedef enum {
 } Mode;
 
 /* frame-buffer row */
-#define FB_ROW_SZ 4096
+#define FB_ROW_SZ 8192  /* prevent ANSI truncation */
 typedef struct {
     char cur[FB_ROW_SZ];
     char prev[FB_ROW_SZ];

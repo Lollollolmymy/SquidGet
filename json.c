@@ -160,7 +160,12 @@ static JNode *parse_object(P *p) {
         if (*p->p == ':') p->p++;
         ws(p);
         JNode *child = parse_value(p);
-        if (!child) { free(key); break; }  /* unrecognised token — stop, don't loop */
+        if (!child) { 
+            free(key);
+            /* skip to next comma/brace instead of dropping remaining keys */
+            while (*p->p && *p->p != ',' && *p->p != '}') p->p++;
+            if (*p->p == ',') { p->p++; continue; } else break;
+        }
         child->key = key;
         if ((size_t)n->arr.len >= cap) {
             cap *= 2;
@@ -269,6 +274,7 @@ const char *jstr(JNode *n) {
 double jnum(JNode *n) {
     if (!n) return 0.0;
     if (n->type == J_NUM)  return n->n;
+    if (n->type == J_BOOL) return n->b ? 1.0 : 0.0;
     if (n->type == J_STR && n->s) { char *e; double v = strtod(n->s, &e); if (e != n->s) return v; }
     return 0.0;
 }

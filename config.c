@@ -63,7 +63,7 @@ int config_load(char *out_dir, size_t sz) {
     FILE *f = fopen(path, "r");
     if (!f) return 0;
 
-    char line[512];
+    char line[600];  /* handle long paths */
     while (fgets(line, sizeof(line), f)) {
         if (strncmp(line, "out_dir=", 8) != 0) continue;
 

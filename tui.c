@@ -128,8 +128,8 @@ static void term_size(int *rows, int *cols) {
     *rows = 24; *cols = 80;
 }
 
-// unicode character width
 static int cp_width(unsigned int cp) {
+    /* includes modern emoji U+1F300-U+1FAFF */
     if (cp == 0 || (cp >= 0x07 && cp <= 0x0F)) return 0;
     if (cp < 0x20 || (cp >= 0x7F && cp < 0xA0)) return 0;
     if ((cp>=0x0300&&cp<=0x036F)||(cp>=0x0483&&cp<=0x0489)||
@@ -142,7 +142,7 @@ static int cp_width(unsigned int cp) {
         (cp>=0x3400&&cp<=0x4DBF)||(cp>=0x4E00&&cp<=0xA4CF)||
         (cp>=0xAC00&&cp<=0xD7FF)||(cp>=0xF900&&cp<=0xFAFF)||
         (cp>=0xFE30&&cp<=0xFE6F)||(cp>=0xFF01&&cp<=0xFF60)||
-        (cp>=0xFFE0&&cp<=0xFFE6)||(cp>=0x1F300&&cp<=0x1F64F)||
+        (cp>=0xFFE0&&cp<=0xFFE6)||(cp>=0x1F300&&cp<=0x1FAFF)||
         (cp>=0x20000&&cp<=0x2FFFD)||(cp>=0x30000&&cp<=0x3FFFD)) return 2;
     return 1;
 }
@@ -620,7 +620,6 @@ void tui_resize(AppState *s) {
     int r, c; term_size(&r, &c);
     if (r != s->rows || c != s->cols) {
         s->rows = r; s->cols = c;
-        if (s->fb) for (int i = 0; i < s->fb_rows; i++) s->fb[i].prev[0] = '\1';
         fputs(A_CLR, stdout); fflush(stdout);
     }
 }

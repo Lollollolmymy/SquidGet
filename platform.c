@@ -94,7 +94,7 @@ static int popen_first_line(const char *cmd, char *buf, size_t bufsz) {
     char tmp[512] = {0};
     fgets(tmp, sizeof(tmp), p);
     int status = pclose(p);
-    (void)status;
+    if (WEXITSTATUS(status) != 0) return 0;  /* verify picker succeeded */
     if (!strip_nl(tmp)) return 0;
     snprintf(buf, bufsz, "%s", tmp);
     return 1;

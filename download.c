@@ -64,8 +64,8 @@ static void tag_file(const char *path, const char *ext,
         "where ffmpeg >NUL 2>NUL && "
         "ffmpeg -y -loglevel error -i \"%s\""
         " -metadata title=\"%s\" -metadata artist=\"%s\" -metadata album=\"%s\""
-        " -c copy \"%s\" >NUL 2>NUL && move /Y \"%s\" \"%s\" >NUL 2>NUL",
-        ep, et, ea, eb, etmp, etmp, ep);
+        " -c copy \"%s\" >NUL 2>NUL && move /Y \"%s\" \"%s\" >NUL 2>NUL || del /F /Q \"%s\" >NUL 2>NUL",
+        ep, et, ea, eb, etmp, etmp, ep, etmp);
     system(cmd);
     (void)ext;
 #else
@@ -150,13 +150,19 @@ static char *b64_decode(const char *in, size_t *out_len) {
     size_t j = 0;
     size_t i = 0;
     while (i < ilen) {
-        /* skip whitespace / line breaks that some encoders insert */
+        /* skip whitespace before each char (handles non-standard encoders) */
         while (i < ilen && (in[i]==' '||in[i]=='\r'||in[i]=='\n'||in[i]=='\t')) i++;
         if (i >= ilen) break;
 
         int c0 = b64_val((unsigned char)in[i++]);
+        
+        while (i < ilen && (in[i]==' '||in[i]=='\r'||in[i]=='\n'||in[i]=='\t')) i++;
         int c1 = (i < ilen && in[i] != '=') ? b64_val((unsigned char)in[i++]) : (i++, -1);
+        
+        while (i < ilen && (in[i]==' '||in[i]=='\r'||in[i]=='\n'||in[i]=='\t')) i++;
         int c2 = (i < ilen && in[i] != '=') ? b64_val((unsigned char)in[i++]) : (i++, -1);
+        
+        while (i < ilen && (in[i]==' '||in[i]=='\r'||in[i]=='\n'||in[i]=='\t')) i++;
         int c3 = (i < ilen && in[i] != '=') ? b64_val((unsigned char)in[i++]) : (i++, -1);
 
         if (c0 < 0 || c1 < 0) break;
@@ -395,7 +401,7 @@ int download_track(const Track *t, const char *quality,
 
     // try best quality first, then fall back to lower ones
     static const char *const fallback[] = {
-        "HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW", NULL
+        "HI_RES_LOSSLESS", "LOSSLESS", "HIGH", "LOW", "DOLBY_ATMOS", NULL
     };
 
     Manifest m;
@@ -479,6 +485,12 @@ int download_track(const Track *t, const char *quality,
         ok = 0;
     } else {
         /* DASH — concatenate segments */
+        /* ensure output dir exists */
+#ifdef _WIN32
+        CreateDirectoryA(out_dir, NULL);
+#else
+        mkdir(out_dir, 0755);
+#endif
         snprintf(final_out, sizeof(final_out), "%s" SQT_SEP "%s - %s.%s",
                  out_dir, artist_s, title_s, m.ext);
 

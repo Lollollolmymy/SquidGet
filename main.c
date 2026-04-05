@@ -241,7 +241,11 @@ static void launch_bg(AppState *s, BgCtx *ctx) {
 static void do_search(AppState *s) {
     if (!*s->query) return;
     BgCtx *ctx = calloc(1, sizeof(BgCtx));
-    if (!ctx) return;
+    if (!ctx) {
+        snprintf(s->status, sizeof(s->status), "error: out of memory");
+        s->dirty = 1;
+        return;
+    }
     ctx->s = s;
     ctx->task = BG_SEARCH;
     snprintf(ctx->query, sizeof(ctx->query), "%s", s->query);
@@ -253,7 +257,11 @@ static void do_search(AppState *s) {
 static void do_album_search(AppState *s) {
     if (!*s->query) return;
     BgCtx *ctx = calloc(1, sizeof(BgCtx));
-    if (!ctx) return;
+    if (!ctx) {
+        snprintf(s->status, sizeof(s->status), "error: out of memory");
+        s->dirty = 1;
+        return;
+    }
     ctx->s = s;
     ctx->task = BG_ALBUM_SEARCH;
     snprintf(ctx->query, sizeof(ctx->query), "%s", s->query);
@@ -302,14 +310,15 @@ static void start_download(AppState *s, int cursor, int qual_idx) {
 }
 
 #ifndef _WIN32
+#  include <unistd.h>
 static AppState *g_sig_state = NULL;
 static volatile sig_atomic_t g_resize_pending = 0;
-// terminal resize event
 static void on_sigwinch(int _) { (void)_; g_resize_pending = 1; }
-// cleanup on ctrl-c etc
 static void on_fatal_sig(int _) {
     (void)_;
-    if (g_sig_state) tui_cleanup(g_sig_state);
+    /* async-safe cleanup: use write() not fputs() */
+    const char *cleanup = "\033[?25h\033[0m\033[?1049l\n";
+    write(STDOUT_FILENO, cleanup, 30);
     _exit(1);
 }
 #endif
@@ -385,9 +394,9 @@ int main(void) {
             /* TAB: toggle between song search and album search */
             if (key == KEY_TAB) {
                 s.search_type = (s.search_type == SEARCH_SONGS) ? SEARCH_ALBUMS : SEARCH_SONGS;
-                s.mode        = MODE_SEARCH;
-                s.track_count = 0;
+                s.track_count = 0;  /* clear counts first */
                 s.album_count = 0;
+                s.mode        = MODE_SEARCH;  /* then mode */
                 s.cursor = s.scroll = 0;
                 s.dirty = 1;
                 break;
@@ -427,7 +436,7 @@ int main(void) {
                 int list_len = (s.search_type == SEARCH_ALBUMS) ? s.album_count : s.track_count;
                 if (s.mode == MODE_RESULTS && s.cursor < list_len - 1) {
                     s.cursor++;
-                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS;
+                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
                     if (s.cursor >= s.scroll + vis) s.scroll = s.cursor - vis + 1;
                     s.dirty = 1;
                 }
@@ -437,7 +446,7 @@ int main(void) {
             if (key == KEY_END) {
                 int list_len = (s.search_type == SEARCH_ALBUMS) ? s.album_count : s.track_count;
                 if (s.mode == MODE_RESULTS && list_len > 0) {
-                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS;
+                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
                     s.cursor = list_len - 1;
                     if (s.cursor >= s.scroll + vis) s.scroll = s.cursor - vis + 1;
                     s.dirty = 1;
@@ -446,7 +455,7 @@ int main(void) {
             }
             if (key == KEY_PGUP) {
                 if (s.mode == MODE_RESULTS) {
-                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS;
+                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
                     s.cursor = s.cursor > vis ? s.cursor - vis : 0;
                     if (s.cursor < s.scroll) s.scroll = s.cursor;
                     s.dirty = 1;
@@ -456,7 +465,7 @@ int main(void) {
             if (key == KEY_PGDN) {
                 int list_len = (s.search_type == SEARCH_ALBUMS) ? s.album_count : s.track_count;
                 if (s.mode == MODE_RESULTS && list_len > 0) {
-                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS;
+                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
                     s.cursor += vis;
                     if (s.cursor >= list_len) s.cursor = list_len - 1;
                     if (s.cursor >= s.scroll + vis) s.scroll = s.cursor - vis + 1;
@@ -627,7 +636,8 @@ int main(void) {
     sqt_mutex_lock(&s.lock);
     int was_running = s.bg_running;
     sqt_mutex_unlock(&s.lock);
-    if (was_running) sqt_thread_join(s.bg_thread);
+    if (was_running)
+        sqt_thread_join(s.bg_thread);
 
     if (s.fb) free(s.fb);
     sqt_mutex_destroy(&s.lock);
