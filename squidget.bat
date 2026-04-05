@@ -1,12 +1,14 @@
 @echo off
 setlocal enabledelayedexpansion
 
-set "DIR=%~sdp0"
+:: get absolute path regardless of how the script was called
+cd /d "%~dp0"
+set "DIR=%cd%\"
 set "TCC=%DIR%tcc\tcc.exe"
 set "IMPDEF=%DIR%tcc\tiny_impdef.exe"
 set "EXE=%DIR%squidget.exe"
 
-:: ── already compiled: just run ─────────────────────────────────────────
+:: already compiled: just run
 if exist "%EXE%" goto run
 
 echo [squidget] compiling...
