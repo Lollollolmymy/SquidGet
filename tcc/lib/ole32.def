@@ -1,0 +1,18 @@
+LIBRARY OLE32.DLL
+EXPORTS
+CLSIDFromProgID
+CLSIDFromString
+CoCreateInstance
+CoFreeUnusedLibraries
+CoGetClassObject
+CoInitialize
+CoInitializeEx
+CoTaskMemAlloc
+CoTaskMemFree
+CoUninitialize
+CreateStreamOnHGlobal
+GetHGlobalFromStream
+OleInitialize
+OleUninitialize
+StringFromCLSID
+StringFromGUID2
