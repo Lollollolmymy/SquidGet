@@ -38,34 +38,24 @@ pause
 exit /b 1
 
 :found_repo
-set "DIR=%cd%\"
-set "TCC=%DIR%tcc\tcc.exe"
-set "IMPDEF=%DIR%tcc\tiny_impdef.exe"
-set "EXE=%DIR%squidget.exe"
-
-if exist "%EXE%" (
-    echo [squidget] launching...
-    goto run
-)
-
 echo [squidget] compiling...
 
-"%IMPDEF%" C:\Windows\System32\winhttp.dll -o "%DIR%tcc\lib\winhttp.def"
+tcc\tiny_impdef.exe C:\Windows\System32\winhttp.dll -o tcc\lib\winhttp.def
 
 set SQT_DEBUG=1
 if "%SQT_DEBUG%"=="1" (set DBG_FLAG=-DSQT_DEBUG) else (set DBG_FLAG=)
 
-"%TCC%" -O2 %DBG_FLAG% ^
-    "%DIR%main.c" "%DIR%api.c" "%DIR%download.c" ^
-    "%DIR%tui.c"  "%DIR%json.c" "%DIR%config.c" "%DIR%platform.c" ^
-    "%DIR%tcc\lib\winhttp.def" ^
-    -I"%DIR%" -I"%DIR%tcc\include" -I"%DIR%tcc\include\winapi" ^
-    -L"%DIR%tcc\lib" ^
-    -lshell32 -lole32 -lm ^
-    -o "%EXE%"
+tcc\tcc.exe -O2 %DBG_FLAG% ^
+    main.c api.c download.c ^
+    tui.c json.c config.c platform.c ^
+    tcc\lib\winhttp.def ^
+    -I. -I"tcc\include" -I"tcc\include\winapi" ^
+    -L"tcc\lib" ^
+    -lshell32 -lole32 ^
+    -o squidget.exe
 
 if errorlevel 1 (
-    if exist "%EXE%" del "%EXE%"
+    if exist squidget.exe del squidget.exe
     echo [squidget] compilation failed.
     pause
     exit /b 1
@@ -74,4 +64,4 @@ if errorlevel 1 (
 echo [squidget] done.
 
 :run
-"%EXE%"
+squidget.exe
