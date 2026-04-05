@@ -30,7 +30,7 @@ Uses Spotisaver to resolve Spotify metadata and fetch download URLs, handles qua
 | Platform | Status |
 |----------|--------|
 | Windows  | Fully supported — TCC compiler included, no install needed |
-| macOS    | Fully supported — auto-installs dependencies via run.sh |
+| macOS    | Fully supported — auto-installs dependencies via build.sh |
 | Linux    | Supported — requires GCC and curl CLI |
 
 ---
@@ -60,8 +60,8 @@ Run `squidget.bat`. It uses the bundled TCC compiler to build and launch automat
 ```sh
 git clone https://github.com/lollollolmymy/Squidget.git
 cd Squidget
-chmod +x run.sh
-./run.sh
+chmod +x build.sh
+./build.sh
 ```
 
 On first run it compiles the binary and removes the quarantine flag so macOS doesn't block it. Subsequent runs launch directly.
@@ -71,8 +71,8 @@ On first run it compiles the binary and removes the quarantine flag so macOS doe
 ```sh
 git clone https://github.com/lollollolmymy/Squidget.git
 cd Squidget
-chmod +x run.sh
-./run.sh
+chmod +x build.sh
+./build.sh
 ```
 
 The script checks for GCC and curl, installs them if missing (apt, pacman, and dnf supported), then compiles and launches.
@@ -131,7 +131,7 @@ out_dir=/path/to/your/music/folder
 Make sure GCC and curl are installed: `sudo apt install gcc curl` (or pacman/dnf equivalent)
 
 **macOS says the binary is damaged**  
-Run `xattr -d com.apple.quarantine ./squidget` or just use `run.sh` which handles this automatically.
+Run `xattr -d com.apple.quarantine ./squidget` or just use `build.sh` which handles this automatically.
 
 **Album downloads aren't working**  
 Make sure your save directory exists and is writable. Squidget creates the album subfolder automatically.
@@ -141,7 +141,7 @@ Make sure your save directory exists and is writable. Squidget creates the album
 Make sure GCC and curl are installed: `sudo apt install gcc curl`
 
 **macOS says the binary is damaged or can't be opened**  
-Run `xattr -d com.apple.quarantine ./squidget` to remove the quarantine flag, or just use `run.sh` which handles this automatically.
+Run `xattr -d com.apple.quarantine ./squidget` to remove the quarantine flag, or just use `build.sh` which handles this automatically.
 
 ---
 
