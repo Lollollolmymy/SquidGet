@@ -474,6 +474,16 @@ int main(void) {
                 }
                 break;
             }
+            /* Ctrl+U clears query manually */
+            if (key == 21) {  /* Ctrl+U */
+                s.query[0] = '\0'; s.query_len = 0;
+                s.mode = MODE_SEARCH;
+                s.track_count = 0;
+                s.album_count = 0;
+                s.cursor = s.scroll = 0;
+                s.dirty = 1;
+                break;
+            }
             /* / clears query and restarts search */
             if (key == '/' && s.mode == MODE_RESULTS) {
                 s.query[0] = '\0'; s.query_len = 0;
@@ -484,14 +494,10 @@ int main(void) {
                 s.dirty = 1;
                 break;
             }
-            /* any printable char: if in results, clear and start new search */
+            /* any printable char: append to query (don't auto-clear on results) */
             if (key >= 32 && key < 256 && s.query_len < (int)sizeof(s.query) - 2) {
                 if (s.mode == MODE_RESULTS) {
-                    s.query[0] = '\0'; s.query_len = 0;
-                    s.mode = MODE_SEARCH;
-                    s.track_count = 0;
-                    s.album_count = 0;
-                    s.cursor = s.scroll = 0;
+                    s.mode = MODE_SEARCH;  /* switch to search mode, keep query */
                 }
                 s.query[s.query_len++] = (char)key;
                 s.query[s.query_len]   = '\0';

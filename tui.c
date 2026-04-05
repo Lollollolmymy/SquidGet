@@ -575,7 +575,7 @@ void tui_render(AppState *s) {
         KB kb[8]; int nkb = 0;
 #define K(key,val) kb[nkb].k=(key);kb[nkb].v=(val);nkb++
         if (s->mode == MODE_SEARCH || s->mode == MODE_RESULTS) {
-            K("↑↓","nav"); K("enter","select"); K("/","search");
+            K("↑↓","nav"); K("enter","select"); K("/","search"); K("^U","clear");
             K("tab", s->search_type == SEARCH_ALBUMS ? "songs" : "albums");
             K("^C","quit");
         } else if (s->mode == MODE_QUALITY) {
