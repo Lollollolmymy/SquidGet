@@ -108,8 +108,8 @@ Albums automatically create a subfolder with the album name inside your download
 | Arrow keys | Navigate lists |
 | Enter | Select / confirm |
 | Tab | Switch to albums ↔ tracks |
-| / | Focus search bar |
 | Backspace | Edit search query |
+| Ctrl+U | Clear search |
 | Ctrl+C | Quit |
 
 ---
