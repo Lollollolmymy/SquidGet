@@ -1,7 +1,5 @@
 @echo off
-REM Universal SquidGet Builder - works from any old downloaded version directory
-
-REM Find the deepest squidget repo (handles nested structures)
+REM Universal SquidGet Builder - works from any downloaded version
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
@@ -15,8 +13,27 @@ if exist "SquidGet-main\main.c" (
     cd SquidGet-main
     goto found_repo
 )
+if exist ".\SquidGet-main\main.c" (
+    cd .\SquidGet-main
+    goto found_repo
+)
+if exist "..\main.c" (
+    cd ..
+    goto found_repo
+)
+if exist "..\..\main.c" (
+    cd ..\..
+    goto found_repo
+)
 
-echo Error: Could not find SquidGet source files  
+echo Error: Could not find SquidGet source files in:
+echo Current: %cd%
+echo Checking parent directories...
+if exist "..\SquidGet-main\main.c" (
+    cd ..\SquidGet-main
+    goto found_repo
+)
+
 pause
 exit /b 1
 
