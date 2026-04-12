@@ -36,7 +36,7 @@ case "$OS" in
         
         # Compile
         gcc -std=c11 -Wall -Wextra -O2 -g \
-            main.c api.c download.c tui.c json.c config.c platform.c \
+            main.c api.c download.c tui.c json.c config.c platform.c tag.c \
             -lpthread -o squidget
         
         echo "[squidget] done."
@@ -78,7 +78,7 @@ case "$OS" in
         
         # Compile
         gcc -std=c11 -Wall -Wextra -O2 -g \
-            main.c api.c download.c tui.c json.c config.c platform.c \
+            main.c api.c download.c tui.c json.c config.c platform.c tag.c \
             -lpthread -o squidget
         
         echo "[squidget] done."
