@@ -76,7 +76,7 @@ static int wh_do(const char *url, Buf *body, FILE *fp, DWORD toms) {
         status=(int)s;
         DWORD avail=0,nr=0;
         while (WinHttpQueryDataAvailable(hr,&avail)&&avail>0) {
-            char chunk[65536];
+            char chunk[16384];  /* replaced 65536 with 16KB stack-safe buffer */
             DWORD want=avail<(DWORD)sizeof chunk?avail:(DWORD)sizeof chunk;
             if (!WinHttpReadData(hr,chunk,want,&nr)||nr==0) break;
             if (fp) {
@@ -94,7 +94,7 @@ char *http_get(const char *url) {
     // retry 3x with backoff
     for (int i=0;i<3;i++) {
         b.len=0; b.buf[0]='\0';
-        int s=wh_do(url,&b,NULL,20000);
+        int s=wh_do(url,&b,NULL,15000);
         if(s>=200&&s<400){res=b.buf;break;}
         if(i<2) sqt_sleep_ms(500*(i+1));
     }
@@ -104,11 +104,12 @@ char *http_get(const char *url) {
 
 long http_get_file(const char *url, const char *path) {
     FILE *f=fopen(path,"wb");
-    if(!f){fprintf(stderr,"[squidget] fopen failed: %s\n",path);return -1;}
-    int s=wh_do(url,NULL,f,120000);
+    if(!f){SQT_LOG("fopen failed: %s", path);return -1;}
+    SQT_LOG("Downloading from: %s", url);
+    int s=wh_do(url,NULL,f,60000);
     long sz=(long)ftell(f); fclose(f);
-    if(s==0){remove(path);fprintf(stderr,"[squidget] WinHTTP connection failed (URL too long or TLS error?)\n");return -1;}
-    if(s<200||s>=400){remove(path);fprintf(stderr,"[squidget] HTTP %d for download URL\n",s);return -1;}
+    if(s==0){remove(path);SQT_LOG("WinHTTP connection failed (URL too long or TLS error?)");return -1;}
+    if(s<200||s>=400){remove(path);SQT_LOG("HTTP %d for download URL: %s", s,url);return -1;}
     return sz;
 }
 
@@ -171,11 +172,11 @@ static char *popen_read(const char *cmd) {
 char *http_get(const char *url) {
     char esc_url[4096];
     shell_escape(url, esc_url, sizeof esc_url);
-    char cmd[8192];  /* esc_url up to 4095 + fixed prefix ~57 chars */
+    char cmd[8192];  /* esc_url up to 4095 + fixed prefix ~200 chars */
     char *res = NULL;
     for (int i = 0; i < 3; i++) {
         snprintf(cmd, sizeof cmd,
-                 "curl -sSL --max-time 20 -A 'squidget/2.0' '%s' 2>/dev/null",
+                 "curl -sSL --max-time 15 -A 'squidget/2.0' '%s' 2>/dev/null",
                  esc_url);
         res = popen_read(cmd);
         if (res) break;
@@ -190,7 +191,7 @@ long http_get_file(const char *url, const char *path) {
     shell_escape(path, esc_path, sizeof esc_path);
     char cmd[8192];
     snprintf(cmd, sizeof cmd,
-             "curl -sSL --max-time 120 -A 'squidget/2.0' -o '%s' '%s'",
+             "curl -sSL --max-time 60 -A 'squidget/2.0' -o '%s' '%s'",
              esc_path, esc_url);
     FILE *p = popen(cmd, "r");
     if (!p) { remove(path); return -1; }
@@ -210,37 +211,84 @@ long http_get_file(const char *url, const char *path) {
 static char *api_call(const char *path, const char *params) {
     char url[2048];
     if (params && *params)
-        snprintf(url, sizeof url, "%s%s?%s", SQT_BASE, path, params);
+        snprintf(url, sizeof url, "%s%s?%s", SQT_BASE_API, path, params);
     else
-        snprintf(url, sizeof url, "%s%s", SQT_BASE, path);
+        snprintf(url, sizeof url, "%s%s", SQT_BASE_API, path);
     return http_get(url);
 }
 
 static void fill_track(JNode *t, Track *out) {
     memset(out, 0, sizeof *out);
+
     JNode *id = jobj_get(t, "id");
     if (id && id->type == J_NUM) snprintf(out->id, sizeof out->id, "%.0f", id->n);
     else                          snprintf(out->id, sizeof out->id, "%s",   jstr(id));
-    snprintf(out->title, sizeof out->title, "%s", jstr(jobj_get(t,"title")));
 
+    snprintf(out->title, sizeof out->title, "%s", jstr(jobj_get(t, "title")));
+
+    /* artist — prefer artists[] array, fall back to artist object or string */
     JNode *artists = jobj_get(t, "artists");
     if (artists && artists->type == J_ARR && artists->arr.len > 0) {
         JNode *a0 = artists->arr.items[0];
-        snprintf(out->artist, sizeof out->artist, "%s", jstr(jobj_get(a0,"name")));
+        snprintf(out->artist, sizeof out->artist, "%s", jstr(jobj_get(a0, "name")));
     } else {
         JNode *ao = jobj_get(t, "artist");
         if (ao && ao->type == J_OBJ)
-            snprintf(out->artist, sizeof out->artist, "%s", jstr(jobj_get(ao,"name")));
+            snprintf(out->artist, sizeof out->artist, "%s", jstr(jobj_get(ao, "name")));
         else
-            snprintf(out->artist, sizeof out->artist, "%s", jstr(jobj_get(t,"artist")));
+            snprintf(out->artist, sizeof out->artist, "%s", jstr(jobj_get(t, "artist")));
     }
 
+    /* album title + cover UUID */
     JNode *album = jobj_get(t, "album");
-    if (album && album->type == J_OBJ)
-        snprintf(out->album, sizeof out->album, "%s", jstr(jobj_get(album,"title")));
+    if (album && album->type == J_OBJ) {
+        /* Normal case: album is an object with a "title" field */
+        snprintf(out->album, sizeof out->album, "%s", jstr(jobj_get(album, "title")));
+        /* Tidal cover UUID: replace '-' with '/' to form CDN path */
+        const char *uuid = jstr(jobj_get(album, "cover"));
+        if (uuid && uuid[0]) {
+            size_t j = 0;
+            for (const char *c = uuid; *c && j < sizeof(out->cover) - 1; c++)
+                out->cover[j++] = (*c == '-') ? '/' : *c;
+            out->cover[j] = '\0';
+        }
+    } else if (album && album->type == J_STR && album->s && album->s[0]) {
+        /* Fallback: album returned as a plain string */
+        snprintf(out->album, sizeof out->album, "%s", album->s);
+    } else {
+        /* Fallback: check "albumTitle" top-level field (some API variants) */
+        const char *at = jstr(jobj_get(t, "albumTitle"));
+        if (at && at[0]) snprintf(out->album, sizeof out->album, "%s", at);
+    }
 
-    out->duration = (int)jnum(jobj_get(t, "duration"));
-    snprintf(out->quality, sizeof out->quality, "%s", jstr(jobj_get(t, "audioQuality")));
+    /* year — try multiple field names that different API responses use */
+    {
+        const char *yr = NULL;
+        /* streamStartDate: "2021-06-18T…" → first 4 chars */
+        const char *ssd = jstr(jobj_get(t, "streamStartDate"));
+        if (ssd && ssd[0]) yr = ssd;
+        /* releaseDate: same ISO format */
+        if (!yr || !yr[0]) { const char *rd = jstr(jobj_get(t, "releaseDate")); if (rd && rd[0]) yr = rd; }
+        /* date: plain year or ISO date */
+        if (!yr || !yr[0]) { const char *d = jstr(jobj_get(t, "date")); if (d && d[0]) yr = d; }
+        /* year: plain integer string */
+        if (!yr || !yr[0]) { const char *y = jstr(jobj_get(t, "year")); if (y && y[0]) yr = y; }
+        if (yr && yr[0]) snprintf(out->year, sizeof out->year, "%.4s", yr);
+    }
+
+    out->track_num = (int)jnum(jobj_get(t, "trackNumber"));
+    out->disc_num  = (int)jnum(jobj_get(t, "volumeNumber"));
+    out->duration  = (int)jnum(jobj_get(t, "duration"));
+
+    JNode *expl = jobj_get(t, "explicit");
+    out->explicit_ = (expl && expl->type == J_BOOL && expl->b) ? 1 : 0;
+
+    JNode *rg = jobj_get(t, "replayGain");
+    out->replay_gain = rg ? (float)rg->n : 0.0f;
+
+    snprintf(out->isrc,      sizeof out->isrc,      "%s", jstr(jobj_get(t, "isrc")));
+    snprintf(out->copyright, sizeof out->copyright, "%s", jstr(jobj_get(t, "copyright")));
+    snprintf(out->quality,   sizeof out->quality,   "%s", jstr(jobj_get(t, "audioQuality")));
 }
 
 int api_search_tracks(const char *query, Track *out, int max) {
@@ -318,15 +366,34 @@ int api_get_album_tracks(const char *album_id, Track *out, int max) {
 
     /* root = {data: {items: [{item:{...}}, ...] } } or [array_format] for backwards compat */
     JNode *items = NULL;
-    
-    /* Try new format: { data: { items: [...] } } */
+    char album_name[256] = {0};  /* album title extracted at album level */
+    char album_cover[256] = {0}; /* album cover UUID at album level */
+
+    /* Try new format: { data: { title: "...", items: [...] } } */
     if (root->type == J_OBJ) {
         JNode *data = jobj_get(root, "data");
-        if (data && data->type == J_OBJ)
+        if (data && data->type == J_OBJ) {
+            /* extract album-level title so we can inject into tracks that lack it */
+            const char *t = jstr(jobj_get(data, "title"));
+            if (t && t[0]) snprintf(album_name, sizeof album_name, "%s", t);
+            /* extract album-level cover UUID */
+            const char *uuid = jstr(jobj_get(data, "cover"));
+            if (uuid && uuid[0]) {
+                size_t j = 0;
+                for (const char *c = uuid; *c && j < sizeof(album_cover)-1; c++)
+                    album_cover[j++] = (*c == '-') ? '/' : *c;
+                album_cover[j] = '\0';
+            }
             items = jobj_get(data, "items");
+        }
     }
     /* Fallback to old format: [album_meta, tracks_obj] */
     else if (root->type == J_ARR && root->arr.len >= 2) {
+        JNode *ameta = root->arr.items[0];
+        if (ameta && ameta->type == J_OBJ) {
+            const char *t = jstr(jobj_get(ameta, "title"));
+            if (t && t[0]) snprintf(album_name, sizeof album_name, "%s", t);
+        }
         JNode *tobj = root->arr.items[1];
         if (tobj && tobj->type == J_OBJ)
             items = jobj_get(tobj, "items");
@@ -339,9 +406,56 @@ int api_get_album_tracks(const char *album_id, Track *out, int max) {
             JNode *wrap  = items->arr.items[i];
             JNode *track = jobj_get(wrap, "item");
             if (!track) track = wrap;
-            fill_track(track, &out[cnt++]);
+            fill_track(track, &out[cnt]);
+            /* If fill_track couldn't find album name, inject it from album-level metadata */
+            if (!out[cnt].album[0] && album_name[0])
+                snprintf(out[cnt].album, sizeof out[cnt].album, "%s", album_name);
+            /* Same for cover art UUID */
+            if (!out[cnt].cover[0] && album_cover[0])
+                snprintf(out[cnt].cover, sizeof out[cnt].cover, "%s", album_cover);
+            cnt++;
         }
     }
     json_free(root);
     return cnt;
+}
+
+/* Fetch full track metadata from /info/ (year, ISRC, cover, etc.).
+   Merges into *out — fields already set in *out are preserved if /info/
+   returns empty strings for them.                                        */
+int api_get_track_info(const char *track_id, Track *out) {
+    char params[128];
+    snprintf(params, sizeof params, "id=%s", track_id);
+    SQT_LOG("Fetching track info for ID: %s", track_id);
+    char *resp = api_call("/info/", params);
+    if (!resp) { SQT_LOG("Failed to fetch track info"); return 0; }
+    JNode *root = json_parse(resp); free(resp);
+    if (!root) { SQT_LOG("Failed to parse track info JSON"); return 0; }
+    JNode *data = jobj_get(root, "data");
+    if (!data) { SQT_LOG("No 'data' field in track info"); json_free(root); return 0; }
+
+    Track fresh;
+    fill_track(data, &fresh);
+
+    /* Merge: prefer fresh values, but don't overwrite with empty strings */
+#define MERGE_STR(f) do { if (fresh.f[0]) snprintf(out->f, sizeof out->f, "%s", fresh.f); } while(0)
+#define MERGE_INT(f) do { if (fresh.f)    out->f = fresh.f; } while(0)
+    MERGE_STR(title);
+    MERGE_STR(artist);
+    MERGE_STR(album);
+    MERGE_STR(cover);
+    MERGE_STR(year);
+    MERGE_STR(isrc);
+    MERGE_STR(copyright);
+    MERGE_STR(quality);
+    MERGE_INT(track_num);
+    MERGE_INT(disc_num);
+    MERGE_INT(duration);
+    MERGE_INT(explicit_);
+    if (fresh.replay_gain != 0.0f) out->replay_gain = fresh.replay_gain;
+#undef MERGE_STR
+#undef MERGE_INT
+
+    json_free(root);
+    return 1;
 }

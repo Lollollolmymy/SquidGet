@@ -1,3 +1,4 @@
+#pragma once
 #ifndef _WIN32
 #  define _DEFAULT_SOURCE   /* exposes usleep, strdup, etc. on glibc */
 #  include <time.h>         /* nanosleep */

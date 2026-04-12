@@ -63,6 +63,8 @@ int gui_pick_folder(char *buf, size_t bufsz) {
 
 int gui_pick_folder(char *buf, size_t bufsz) {
     // osascript dialog
+    /* Command is a compile-time string literal with no user-supplied input —
+     * shell injection is not possible here. */
     FILE *p = popen(
         "osascript -e "
         "'POSIX path of (choose folder with prompt "

@@ -409,7 +409,7 @@ void tui_render(AppState *s) {
         } else if (s->mode == MODE_QUALITY) {
             /* ── quality picker overlay ── */
             if (r == 0) {
-                char titl[SQT_TITLE_SZ];
+                char titl[256];  /* SQT_TITLE_SZ */
                 trunc_to(s->tracks[s->cursor].title, titl, sizeof(titl), inner - 4);
                 rb_s(A_DIM "  "); rb_s(titl); rb_pad(inner - 2 - vw(titl)); rb_s(A_RST);
             } else if (r == 1) {
@@ -435,13 +435,13 @@ void tui_render(AppState *s) {
             /* ── album action overlay (download all / browse songs) ── */
             if (r == 0) {
                 /* album title */
-                char atitl[SQT_TITLE_SZ];
+                char atitl[256];  /* SQT_TITLE_SZ */
                 trunc_to(s->albums[s->cursor].title, atitl, sizeof(atitl), inner - 4);
                 rb_s(TC(s->search_type, C_LOGO, C_LOGO_O)); rb_s(A_BOLD "  "); rb_s(atitl);
                 rb_pad(inner - 2 - vw(atitl)); rb_s(A_RST);
             } else if (r == 1) {
                 /* artist */
-                char art[SQT_TITLE_SZ];
+                char art[256];  /* SQT_TITLE_SZ */
                 trunc_to(s->albums[s->cursor].artist, art, sizeof(art), inner - 6);
                 rb_s(A_DIM "  by "); rb_s(art); rb_pad(inner - 5 - vw(art)); rb_s(A_RST);
             } else if (r == 2) {

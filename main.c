@@ -7,6 +7,31 @@
 #include <sys/stat.h>  /* mkdir */
 #endif
 
+/* ── Windows structured-exception crash handler ── */
+#ifdef _WIN32
+static LONG WINAPI sqt_crash_handler(EXCEPTION_POINTERS *ep) {
+    DWORD code = ep->ExceptionRecord->ExceptionCode;
+    void *addr = ep->ExceptionRecord->ExceptionAddress;
+    const char *name = "UNKNOWN";
+    switch (code) {
+        case EXCEPTION_ACCESS_VIOLATION:         name = "ACCESS_VIOLATION";       break;
+        case EXCEPTION_STACK_OVERFLOW:           name = "STACK_OVERFLOW";         break;
+        case EXCEPTION_ARRAY_BOUNDS_EXCEEDED:    name = "ARRAY_BOUNDS_EXCEEDED";  break;
+        case EXCEPTION_INT_DIVIDE_BY_ZERO:       name = "INT_DIVIDE_BY_ZERO";     break;
+        case EXCEPTION_INT_OVERFLOW:             name = "INT_OVERFLOW";           break;
+        case EXCEPTION_ILLEGAL_INSTRUCTION:      name = "ILLEGAL_INSTRUCTION";    break;
+        case EXCEPTION_PRIV_INSTRUCTION:         name = "PRIVILEGED_INSTRUCTION"; break;
+        case EXCEPTION_IN_PAGE_ERROR:            name = "IN_PAGE_ERROR";          break;
+    }
+    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
+        ULONG_PTR rw  = ep->ExceptionRecord->ExceptionInformation[0];
+        ULONG_PTR bad = ep->ExceptionRecord->ExceptionInformation[1];
+        (void)rw; (void)bad;
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+#endif
+
 // make dirs recursively (windows & unix)
 static void mkdir_p(const char *path) {
 #ifdef _WIN32
@@ -100,10 +125,10 @@ static void build_setup_presets(AppState *s) {
 typedef struct {
     AppState *s;
     char      query[512];
-    char      track_id[SQT_ID_SZ];
-    char      album_id[SQT_ID_SZ];
-    char      album_name[SQT_TITLE_SZ];
-    char      quality[SQT_QUAL_SZ];
+    char      track_id[64];   /* SQT_ID_SZ */
+    char      album_id[64];   /* SQT_ID_SZ */
+    char      album_name[256]; /* SQT_TITLE_SZ */
+    char      quality[64];     /* SQT_QUAL_SZ */
     enum { BG_SEARCH, BG_DOWNLOAD, BG_ALBUM_SEARCH, BG_ALBUM_TRACKS, BG_ALBUM_DOWNLOAD } task;
 } BgCtx;
 
@@ -122,7 +147,15 @@ static SQT_THREAD_FN bg_worker(void *arg) {
     switch (ctx->task) {
 
     case BG_SEARCH: {
-        Track tmp[SQT_MAX_RESULTS];
+        /* heap-alloc: Track is ~2 KB now; 200 of them = ~400 KB — too big for thread stack */
+        Track *tmp = calloc(SQT_MAX_RESULTS, sizeof(Track));
+        if (!tmp) {
+            sqt_mutex_lock(&s->lock);
+            snprintf(s->status, sizeof(s->status), "error: out of memory");
+            s->dirty = 1;
+            sqt_mutex_unlock(&s->lock);
+            break;
+        }
         int n = api_search_tracks(ctx->query, tmp, SQT_MAX_RESULTS);
         sqt_mutex_lock(&s->lock);
         memcpy(s->tracks, tmp, (size_t)n * sizeof(Track));
@@ -132,6 +165,7 @@ static SQT_THREAD_FN bg_worker(void *arg) {
         snprintf(s->status, sizeof(s->status), "%d track%s", n, n == 1 ? "" : "s");
         s->dirty = 1;
         sqt_mutex_unlock(&s->lock);
+        free(tmp);
         break;
     }
 
@@ -143,7 +177,7 @@ static SQT_THREAD_FN bg_worker(void *arg) {
             if (strcmp(s->tracks[i].id, ctx->track_id) == 0) { t = s->tracks[i]; break; }
         }
         sqt_mutex_unlock(&s->lock);
-        download_track(&t, ctx->quality, s->out_dir, dl_progress_cb, s);
+        download_track(&t, ctx->quality, s->out_dir, NULL, dl_progress_cb, s);
         break;
     }
 
@@ -162,23 +196,37 @@ static SQT_THREAD_FN bg_worker(void *arg) {
     }
 
     case BG_ALBUM_TRACKS: {
-        Track tmp[SQT_MAX_RESULTS];
+        Track *tmp = calloc(SQT_MAX_RESULTS, sizeof(Track));
+        if (!tmp) {
+            sqt_mutex_lock(&s->lock);
+            snprintf(s->status, sizeof(s->status), "error: out of memory");
+            s->dirty = 1;
+            sqt_mutex_unlock(&s->lock);
+            break;
+        }
         int n = api_get_album_tracks(ctx->album_id, tmp, SQT_MAX_RESULTS);
         sqt_mutex_lock(&s->lock);
         memcpy(s->tracks, tmp, (size_t)n * sizeof(Track));
         s->track_count = n;
         s->cursor = s->scroll = 0;
-        s->search_type = SEARCH_SONGS;   /* switch to song view to browse */
+        s->search_type = SEARCH_SONGS;
         s->mode        = MODE_RESULTS;
         snprintf(s->status, sizeof(s->status), "%d track%s  (TAB to return to album search)", n, n == 1 ? "" : "s");
         s->dirty = 1;
         sqt_mutex_unlock(&s->lock);
+        free(tmp);
         break;
     }
 
     case BG_ALBUM_DOWNLOAD: {
-        /* fetch all tracks for the album, then download each to album subfolder */
-        Track tracks[SQT_MAX_RESULTS];
+        Track *tracks = calloc(SQT_MAX_RESULTS, sizeof(Track));
+        if (!tracks) {
+            sqt_mutex_lock(&s->lock);
+            snprintf(s->status, sizeof(s->status), "error: out of memory");
+            s->dirty = 1;
+            sqt_mutex_unlock(&s->lock);
+            break;
+        }
         int n = api_get_album_tracks(ctx->album_id, tracks, SQT_MAX_RESULTS);
         if (n <= 0) {
             sqt_mutex_lock(&s->lock);
@@ -188,24 +236,52 @@ static SQT_THREAD_FN bg_worker(void *arg) {
             break;
         }
         
-        /* Create album subfolder */
+        /* Create album subfolder — album_name is already sanitised */
         char album_path[512];
-        snprintf(album_path, sizeof(album_path), "%s/%s", s->out_dir, ctx->album_name);
+        snprintf(album_path, sizeof(album_path), "%s" SQT_SEP "%s", s->out_dir, ctx->album_name);
         mkdir_p(album_path);
-        
-        /* Download each track to album subfolder */
+
+        /* Fetch cover art ONCE for the whole album.
+           Use the first track's info to get the CDN path; this avoids
+           hammering the Tidal CDN once per track (39 redundant requests on a
+           39-track album is enough to get throttled / return errors). */
+        char album_cover[1024] = {0};
+        {
+            Track rich = tracks[0];
+            if (api_get_track_info(tracks[0].id, &rich) == 0 && rich.cover[0]) {
+                char cover_url[768];
+                snprintf(cover_url, sizeof cover_url,
+                         "%s/%s/1280x1280.jpg", SQT_TIDAL_IMG, rich.cover);
+                snprintf(album_cover, sizeof album_cover,
+                         "%s" SQT_SEP ".sqt_cover_album_%s.jpg", album_path, ctx->album_id);
+                if (http_get_file(cover_url, album_cover) <= 0) {
+                    SQT_LOG("album cover fetch failed — tracks will be tagged without art");
+                    album_cover[0] = '\0';
+                } else {
+                    SQT_LOG("album cover cached  path='%s'", album_cover);
+                }
+            }
+        }
+
+        /* Download each track, sharing the pre-fetched cover */
         for (int i = 0; i < n; i++) {
             sqt_mutex_lock(&s->lock);
             snprintf(s->status, sizeof(s->status),
                      "album: %d/%d — %s", i + 1, n, tracks[i].title);
             s->dirty = 1;
             sqt_mutex_unlock(&s->lock);
-            download_track(&tracks[i], ctx->quality, album_path, dl_progress_cb, s);
+            download_track(&tracks[i], ctx->quality, album_path,
+                           album_cover[0] ? album_cover : NULL,
+                           dl_progress_cb, s);
         }
+
+        /* Clean up the shared cover temp file now that all tracks are tagged */
+        if (album_cover[0]) remove(album_cover);
         sqt_mutex_lock(&s->lock);
         snprintf(s->status, sizeof(s->status), "album done! (%d tracks)", n);
         s->dirty = 1;
         sqt_mutex_unlock(&s->lock);
+        free(tracks);
         break;
     }
 
@@ -223,8 +299,9 @@ static SQT_THREAD_FN bg_worker(void *arg) {
 }
 
 static void launch_bg(AppState *s, BgCtx *ctx) {
+    if (!ctx) return;  /* defensive check */
     sqt_mutex_lock(&s->lock);
-    if (s->bg_running) { sqt_mutex_unlock(&s->lock); free(ctx); return; }
+    if (s->bg_running) { sqt_mutex_unlock(&s->lock); free(ctx); ctx = NULL; return; }
     s->bg_running = 1;
     sqt_mutex_unlock(&s->lock);
     if (sqt_thread_create(&s->bg_thread, bg_worker, ctx) != 0) {
@@ -235,6 +312,7 @@ static void launch_bg(AppState *s, BgCtx *ctx) {
         s->dirty = 1;
         sqt_mutex_unlock(&s->lock);
         free(ctx);
+        ctx = NULL;
     }
 }
 
@@ -289,7 +367,9 @@ static void start_album_download(AppState *s, int cursor) {
     ctx->s = s;
     ctx->task = BG_ALBUM_DOWNLOAD;
     snprintf(ctx->album_id, sizeof(ctx->album_id), "%s", s->albums[cursor].id);
-    snprintf(ctx->album_name, sizeof(ctx->album_name), "%s", s->albums[cursor].title);
+    /* sanitise before storing — album title may contain / : * etc. which would
+       wreck the mkdir_p call later (e.g. "AC/DC – Back in Black" → bogus path) */
+    sqt_sanitise(s->albums[cursor].title, ctx->album_name, sizeof(ctx->album_name));
     snprintf(ctx->quality,  sizeof(ctx->quality),  "%s", QUALITY_LABELS[0]);  /* default: best */
     snprintf(s->status, sizeof(s->status), "starting album download…");
     s->dirty = 1;
@@ -327,11 +407,15 @@ int main(void) {
 #ifdef _WIN32
     SetConsoleOutputCP(CP_UTF8);
     SetConsoleCP(CP_UTF8);
+
+    /* register crash handler BEFORE anything else */
+    SetUnhandledExceptionFilter(sqt_crash_handler);
 #endif
 
     AppState s;
     memset(&s, 0, sizeof(s));
     sqt_mutex_init(&s.lock);
+    SQT_LOG("AppState size=%zu  mutex initialised", sizeof(s));
 
     // check if configured
     if (config_load(s.out_dir, sizeof(s.out_dir))) {
@@ -632,6 +716,7 @@ int main(void) {
     }
 
     tui_cleanup(&s);
+    SQT_LOG("tui cleaned up, joining bg thread if running");
 
     sqt_mutex_lock(&s.lock);
     int was_running = s.bg_running;

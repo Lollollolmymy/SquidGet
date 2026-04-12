@@ -14,12 +14,13 @@
 // get config dir for this os
 static void config_dir(char *buf, size_t sz) {
 #ifdef _WIN32
-    char appdata[MAX_PATH] = {0};
+    char appdata[1024] = {0};  /* fixed size instead of VLA MAX_PATH */
     if (GetEnvironmentVariableA("APPDATA", appdata, sizeof(appdata)) && appdata[0])
         snprintf(buf, sz, "%s\\squidget", appdata);
     else {
         const char *up = getenv("USERPROFILE");
-        snprintf(buf, sz, "%s\\.squidget", up ? up : "C:\\");
+        if (!up) up = "C:\\";
+        snprintf(buf, sz, "%s\\.squidget", up);
     }
 #else
     const char *xdg  = getenv("XDG_CONFIG_HOME");

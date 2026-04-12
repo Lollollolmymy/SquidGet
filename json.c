@@ -148,7 +148,7 @@ static JNode *parse_object(P *p) {
     if (!n) return NULL;
     n->type = J_OBJ;
     size_t cap = 8;
-    n->arr.items = malloc(cap * sizeof(JNode *));
+    n->arr.items = calloc(cap, sizeof(JNode *));  /* use calloc instead of malloc */
     if (!n->arr.items) { free(n); return NULL; }
     while (1) {
         ws(p);
@@ -184,7 +184,7 @@ static JNode *parse_array(P *p) {
     if (!n) return NULL;
     n->type = J_ARR;
     size_t cap = 8;
-    n->arr.items = malloc(cap * sizeof(JNode *));
+    n->arr.items = calloc(cap, sizeof(JNode *));  /* use calloc instead of malloc */
     if (!n->arr.items) { free(n); return NULL; }
     while (1) {
         ws(p);
