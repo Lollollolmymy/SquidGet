@@ -74,6 +74,77 @@ static void wr64be(uint8_t *p, uint64_t v) {
     wr32be(p,(uint32_t)(v>>32)); wr32be(p+4,(uint32_t)v);
 }
 
+/* ══════════════════════════ ID3v2 helpers ═══════════════════════════════ */
+
+/* Encode val as a 4-byte syncsafe integer (each byte uses only 7 bits). */
+static void encode_syncsafe(uint8_t out[4], uint32_t val) {
+    out[3] = (uint8_t)(val & 0x7F); val >>= 7;
+    out[2] = (uint8_t)(val & 0x7F); val >>= 7;
+    out[1] = (uint8_t)(val & 0x7F); val >>= 7;
+    out[0] = (uint8_t)(val & 0x7F);
+}
+
+/* Returns total byte length of an ID3v2 block (10-byte header + payload),
+ * or 0 if the data does not start with a valid ID3v2 header. */
+static size_t id3v2_total_size(const uint8_t *data, size_t fsz) {
+    if (fsz < 10 || data[0]!='I' || data[1]!='D' || data[2]!='3') return 0;
+    uint32_t sz = ((uint32_t)(data[6] & 0x7F) << 21)
+                | ((uint32_t)(data[7] & 0x7F) << 14)
+                | ((uint32_t)(data[8] & 0x7F) <<  7)
+                |  (uint32_t)(data[9] & 0x7F);
+    return 10 + (size_t)sz;
+}
+
+/* Build a minimal ID3v2.3 tag containing a single APIC (cover art) frame.
+ * Writes into *b (caller-allocated, zeroed).
+ *
+ * This is prepended before the "fLaC" marker so that macOS Core Audio /
+ * AVFoundation — which does not reliably parse METADATA_BLOCK_PICTURE —
+ * can still display album artwork, while the native PICTURE block remains
+ * for spec-compliant players. */
+static void build_id3v2_apic(Bb *b, const uint8_t *img, size_t img_sz) {
+    const char *mime = (img_sz >= 4 &&
+                        img[0]==0x89 && img[1]=='P' &&
+                        img[2]=='N'  && img[3]=='G')
+                       ? "image/png" : "image/jpeg";
+    size_t mime_len = strlen(mime);
+
+    /* APIC frame content:
+     *   1   text encoding  (0x00 = Latin-1)
+     *   N   MIME type string
+     *   1   MIME null terminator
+     *   1   picture type   (0x03 = front cover)
+     *   1   description null terminator (empty string)
+     *   N   image data
+     */
+    uint32_t apic_content = (uint32_t)(1 + mime_len + 1 + 1 + 1 + img_sz);
+
+    /* ID3v2.3 tag payload = one 10-byte frame header + APIC content */
+    uint32_t tag_payload = 10 + apic_content;
+
+    /* ── ID3v2.3 tag header (10 bytes) ── */
+    bb_put(b, "ID3", 3);
+    bb_u8 (b, 0x03);           /* version 2.3        */
+    bb_u8 (b, 0x00);           /* revision 0         */
+    bb_u8 (b, 0x00);           /* flags (none)       */
+    uint8_t ss[4];
+    encode_syncsafe(ss, tag_payload);
+    bb_put(b, ss, 4);          /* syncsafe tag size  */
+
+    /* ── APIC frame header (10 bytes; ID3v2.3 frame size is plain big-endian) ── */
+    bb_put (b, "APIC", 4);
+    bb_be32(b, apic_content);  /* frame size (NOT syncsafe in v2.3) */
+    bb_be16(b, 0x0000);        /* frame flags                        */
+
+    /* ── APIC frame payload ── */
+    bb_u8(b, 0x00);            /* text encoding: Latin-1             */
+    bb_put(b, mime, mime_len);
+    bb_u8(b, 0x00);            /* null-terminate MIME type           */
+    bb_u8(b, 0x03);            /* picture type: front cover          */
+    bb_u8(b, 0x00);            /* description: empty (null term)     */
+    bb_put(b, img, img_sz);
+}
+
 /* ══════════════════════════ file helpers ════════════════════════════════ */
 
 static uint8_t *file_read(const char *path, size_t *out_sz) {
@@ -203,9 +274,16 @@ static int flac_tag(const char *path, const Track *t, const char *cover_path) {
     if (!file) { SQT_LOG("flac_tag: file_read returned NULL"); return -1; }
     SQT_LOG("flac_tag: file_read ok  fsz=%zu", fsz);
 
-    if (fsz < 4 || memcmp(file, "fLaC", 4) != 0) {
-        SQT_LOG("flac_tag: invalid FLAC magic %02x %02x %02x %02x",
-                file[0], file[1], file[2], file[3]);
+    /* Skip any existing ID3v2 prefix written by a previous tag pass. */
+    size_t flac_start = id3v2_total_size(file, fsz);
+
+    if (flac_start + 4 > fsz || memcmp(file + flac_start, "fLaC", 4) != 0) {
+        SQT_LOG("flac_tag: invalid FLAC magic at offset %zu: %02x %02x %02x %02x",
+                flac_start,
+                flac_start     < fsz ? file[flac_start]   : 0,
+                flac_start + 1 < fsz ? file[flac_start+1] : 0,
+                flac_start + 2 < fsz ? file[flac_start+2] : 0,
+                flac_start + 3 < fsz ? file[flac_start+3] : 0);
         free(file); return -1;
     }
 
@@ -217,7 +295,7 @@ static int flac_tag(const char *path, const Track *t, const char *cover_path) {
 
     typedef struct { int type; uint32_t off, len; } MBlk;
     MBlk keep[64]; int nkeep = 0;
-    size_t pos = 4; int last_block = 0;
+    size_t pos = flac_start + 4; int last_block = 0;
     while (pos + 4 <= fsz && !last_block) {
         uint8_t h0    = file[pos];
         last_block    = (h0 >> 7) & 1;
@@ -252,9 +330,20 @@ static int flac_tag(const char *path, const Track *t, const char *cover_path) {
         build_picture_block(&pic, cover, cover_sz);
         SQT_LOG("flac_tag: picture block built  len=%zu  ptr=%p", pic.len, (void*)pic.d);
     }
+
+    /* Build the ID3v2.3 APIC block while cover is still in memory.
+     * It will be prepended before "fLaC" so macOS AVFoundation can find
+     * the artwork; the PICTURE metadata block below serves spec-compliant
+     * players. */
+    Bb id3 = {0};
+    if (cover && cover_sz > 0)
+        build_id3v2_apic(&id3, cover, cover_sz);
+
     free(cover);
 
     Bb out = {0};
+    if (id3.len > 0) bb_put(&out, id3.d, id3.len);  /* macOS compat prefix */
+    bb_free(&id3);
     bb_put(&out, "fLaC", 4);
     for (int i = 0; i < nkeep; i++) {
         int is_last = (i == nkeep-1) && (vc.len == 0) && (pic.len == 0);
@@ -625,11 +714,23 @@ int sqt_tag(const char *path, const Track *t, const char *cover_jpg) {
             path, t->title, cover_jpg ? cover_jpg : "(none)");
     FILE *f = fopen(path, "rb");
     if (!f) { SQT_LOG("sqt_tag: cannot open file"); return -1; }
-    uint8_t magic[8] = {0};
+    uint8_t magic[10] = {0};
     size_t nr = fread(magic, 1, sizeof magic, f);
+
+    /* If the file opens with an ID3v2 header (from a prior tag pass that
+     * prepended one for macOS compatibility), seek past it to read the
+     * actual format marker. */
+    if (nr >= 10 && magic[0]=='I' && magic[1]=='D' && magic[2]=='3') {
+        size_t id3_sz = id3v2_total_size(magic, nr);
+        if (id3_sz >= 10) {
+            fseek(f, (long)id3_sz, SEEK_SET);
+            nr = fread(magic, 1, 4, f);
+        }
+    }
     fclose(f);
+
     if (nr < 4) { SQT_LOG("sqt_tag: file too small nr=%zu", nr); return -1; }
-    SQT_LOG("sqt_tag: magic %02x %02x %02x %02x", magic[0], magic[1], magic[2], magic[3]);
+    SQT_LOG("sqt_tag: format magic %02x %02x %02x %02x", magic[0], magic[1], magic[2], magic[3]);
     if (memcmp(magic, "fLaC", 4) == 0) {
         SQT_LOG("sqt_tag: dispatching to flac_tag");
         return flac_tag(path, t, cover_jpg);
