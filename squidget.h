@@ -161,11 +161,16 @@ int  gui_pick_folder(char *buf, size_t bufsz);
 /* ── api.c ── */
 char *http_get(const char *url);
 long  http_get_file(const char *url, const char *path);
+/* POST request with JSON body — returns allocated response body or NULL */
+char *http_post(const char *url, const char *json_body);
 int   api_search_tracks(const char *query, Track *out, int max);
 int   api_search_albums(const char *query, Album *out, int max);
 int   api_get_album_tracks(const char *album_id, Track *out, int max);
 /* fetches /info/ for a single track — fills cover, year, ISRC, etc. */
 int   api_get_track_info(const char *track_id, Track *out);
+/* Qobuz fallback: resolves ISRC → direct Akamai FLAC URL via zarz.moe.
+   Returns 1 + fills out_url (size sz) on success; 0 on failure. */
+int   api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz);
 
 /* ── download.c ── */
 /* sanitise a filename/directory component — strips / \ : * ? " < > | */
