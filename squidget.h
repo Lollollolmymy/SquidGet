@@ -1,6 +1,7 @@
 #pragma once
 #include "thread.h"
 #include <stddef.h>
+#include <stdint.h>   /* uint32_t */
 
 #ifndef SQT_LOG
 #  define SQT_LOG(...) ((void)0)
@@ -13,14 +14,6 @@
 #  define SQT_SEP "\\"
 #endif
 
-/* ── API endpoints (split by benchmark results) ── */
-/* search / album / info  →  api.monochrome  (won all 3 API rounds, 172–195 ms) */
-#define SQT_BASE_API      "https://api.monochrome.tf"
-/* /track/ manifest fetch →  hifi.geeked.wtf (score 20, avg 89 ms — fastest download) */
-#define SQT_BASE_DOWNLOAD "https://hifi.geeked.wtf"
-/* Tidal CDN for cover art */
-#define SQT_TIDAL_IMG     "https://resources.tidal.com/images"
-
 #define SQT_MAX_RESULTS  200
 #define SQT_TITLE_SZ     256
 #define SQT_URL_SZ      1024
@@ -32,14 +25,11 @@
 #define SQT_ISRC_SZ       32
 #define SQT_CPR_SZ       256
 
-/* quality labels (must match API strings) */
+/* quality labels */
 #define QUAL_HIR  "HI_RES_LOSSLESS"
-#define QUAL_LOS  "LOSSLESS"
 #define QUAL_HIGH "HIGH"
-#define QUAL_LOW  "LOW"
-#define QUAL_ATM  "DOLBY_ATMOS"
 
-#define QUALITY_COUNT 5
+#define QUALITY_COUNT 1
 extern const char *const QUALITY_LABELS[QUALITY_COUNT];
 
 /* ── Search type ── */
@@ -83,12 +73,15 @@ typedef enum {
     MODE_ALBUM_ACTION, /* download album or browse songs    */
 } Mode;
 
-/* frame-buffer row */
+/* frame-buffer row
+ * prev_hash: FNV-1a 32-bit hash of the last-rendered content.
+ * Replaces the old prev[FB_ROW_SZ] char array, halving per-row memory.
+ * A hash collision (prob ~1 in 4 billion) causes one extra render — harmless. */
 #define FB_ROW_SZ 8192  /* prevent ANSI truncation */
 typedef struct {
-    char cur[FB_ROW_SZ];
-    char prev[FB_ROW_SZ];
-    int  dirty;
+    char     cur[FB_ROW_SZ];
+    uint32_t prev_hash;   /* FNV-1a hash of content last flushed to terminal */
+    int      dirty;
 } FBRow;
 
 /* ── application state ── */
@@ -159,6 +152,9 @@ void config_save(const char *out_dir);
 int  gui_pick_folder(char *buf, size_t bufsz);
 
 /* ── api.c ── */
+/* Initialise / teardown HTTP layer (no-op without SQT_USE_CURL). Call once. */
+void  http_init(void);
+void  http_cleanup(void);
 char *http_get(const char *url);
 long  http_get_file(const char *url, const char *path);
 /* POST request with JSON body — returns allocated response body or NULL */
@@ -201,6 +197,7 @@ int  tui_read_key(AppState *s);
 #define KEY_ESC       261
 #define KEY_BACKSPACE 262
 #define KEY_CTRL_C    3
+#define KEY_CTRL_U    21
 #define KEY_HOME      263
 #define KEY_END       264
 #define KEY_PGUP      265

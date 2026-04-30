@@ -1,5 +1,6 @@
-/* debug: define before squidget.h so it overrides the no-op default */
-#define SQT_LOG(...) fprintf(stderr, "[sqt] " __VA_ARGS__), fprintf(stderr, "\n")
+#ifdef SQT_DEBUG
+#  define SQT_LOG(...) fprintf(stderr, "[sqt] " __VA_ARGS__), fprintf(stderr, "\n")
+#endif
 #include "squidget.h"
 #include "json.h"
 #include <stdlib.h>
@@ -9,7 +10,7 @@
 
 // quality names
 const char *const QUALITY_LABELS[QUALITY_COUNT] = {
-    QUAL_HIR, QUAL_LOS, QUAL_HIGH, QUAL_LOW, QUAL_ATM
+    "Best Available"
 };
 
 // http stuff: winhttp on windows, curl on linux/mac
@@ -47,7 +48,7 @@ static void urlencode(const char *in, char *out, size_t outsz) {
 }
 
 static int wh_do(const char *url, Buf *body, FILE *fp, DWORD toms) {
-    // handle huge tidal urls w/ big buffer
+    // large url buffer for stream URLs
     wchar_t wu[8192];
     if (!MultiByteToWideChar(CP_UTF8,0,url,-1,wu,(int)(sizeof(wu)/sizeof(*wu)))) return 0;
     URL_COMPONENTS uc; memset(&uc,0,sizeof uc); uc.dwStructSize=sizeof uc;
@@ -143,11 +144,12 @@ static int wh_post(const char *url, const char *json_body, Buf *out_buf) {
 char *http_get(const char *url) {
     Buf b={malloc(4096),0,4096}; if(!b.buf) return NULL;
     char *res=NULL;
-    // retry 3x with backoff
+    // retry 3x with backoff — skip retry on 4xx client errors
     for (int i=0;i<3;i++) {
         b.len=0; b.buf[0]='\0';
         int s=wh_do(url,&b,NULL,15000);
         if(s>=200&&s<400){res=b.buf;break;}
+        if(s>=400&&s<500) break; /* client error — retrying won't help */
         if(i<2) sqt_sleep_ms(500*(i+1));
     }
     if(!res) free(b.buf);
@@ -172,8 +174,136 @@ char *http_post(const char *url, const char *json_body) {
     free(b.buf); return NULL;
 }
 
-// posix: use curl cli
+// posix: libcurl (preferred) or curl cli fallback
 #else
+
+/* ── http_init / http_cleanup ─────────────────────────────────────────────── */
+
+#ifdef SQT_USE_CURL
+/* ── libcurl implementation (#2) ─────────────────────────────────────────────
+ * Connection reuse via CURLSH (shared connection + DNS + SSL session cache).
+ * Locking callbacks make the shared handle safe for the album thread pool. */
+#include <curl/curl.h>
+
+static CURLSH         *g_curl_share   = NULL;
+static sqt_mutex_t     g_curl_sh_lock;
+
+static void curl_sh_lock_cb(CURL *h, curl_lock_data d, curl_lock_access a, void *u) {
+    (void)h; (void)d; (void)a; (void)u;
+    sqt_mutex_lock(&g_curl_sh_lock);
+}
+static void curl_sh_unlock_cb(CURL *h, curl_lock_data d, void *u) {
+    (void)h; (void)d; (void)u;
+    sqt_mutex_unlock(&g_curl_sh_lock);
+}
+
+void http_init(void) {
+    curl_global_init(CURL_GLOBAL_ALL);
+    sqt_mutex_init(&g_curl_sh_lock);
+    g_curl_share = curl_share_init();
+    curl_share_setopt(g_curl_share, CURLSHOPT_SHARE,      CURL_LOCK_DATA_CONNECT);
+    curl_share_setopt(g_curl_share, CURLSHOPT_SHARE,      CURL_LOCK_DATA_DNS);
+    curl_share_setopt(g_curl_share, CURLSHOPT_SHARE,      CURL_LOCK_DATA_SSL_SESSION);
+    curl_share_setopt(g_curl_share, CURLSHOPT_LOCKFUNC,   curl_sh_lock_cb);
+    curl_share_setopt(g_curl_share, CURLSHOPT_UNLOCKFUNC, curl_sh_unlock_cb);
+}
+void http_cleanup(void) {
+    if (g_curl_share) { curl_share_cleanup(g_curl_share); g_curl_share = NULL; }
+    sqt_mutex_destroy(&g_curl_sh_lock);
+    curl_global_cleanup();
+}
+
+/* write callbacks */
+static size_t curl_write_buf(char *ptr, size_t sz, size_t n, void *ud) {
+    Buf *b = ud;
+    size_t total = sz * n;
+    if (!buf_ensure(b, total)) return 0;
+    memcpy(b->buf + b->len, ptr, total);
+    b->len += total;
+    b->buf[b->len] = '\0';
+    return total;
+}
+static size_t curl_write_file(char *ptr, size_t sz, size_t n, void *ud) {
+    return fwrite(ptr, sz, n, (FILE *)ud);
+}
+
+/* shared easy-handle setup */
+static CURL *curl_new(long timeout_s) {
+    CURL *c = curl_easy_init();
+    if (!c) return NULL;
+    curl_easy_setopt(c, CURLOPT_SHARE,          g_curl_share);
+    curl_easy_setopt(c, CURLOPT_USERAGENT,      "squidget/2.0");
+    curl_easy_setopt(c, CURLOPT_FOLLOWLOCATION, 1L);
+    curl_easy_setopt(c, CURLOPT_TIMEOUT,        timeout_s);
+    curl_easy_setopt(c, CURLOPT_TCP_KEEPALIVE,  1L);
+    return c;
+}
+
+char *http_get(const char *url) {
+    Buf b = {malloc(4096), 0, 4096};
+    if (!b.buf) return NULL;
+    char *res = NULL;
+    for (int i = 0; i < 3; i++) {
+        b.len = 0; b.buf[0] = '\0';
+        CURL *c = curl_new(15L);
+        if (!c) break;
+        curl_easy_setopt(c, CURLOPT_URL,           url);
+        curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_buf);
+        curl_easy_setopt(c, CURLOPT_WRITEDATA,     &b);
+        CURLcode rc = curl_easy_perform(c);
+        long http_code = 0;
+        curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+        curl_easy_cleanup(c);
+        if (rc == CURLE_OK && http_code >= 200 && http_code < 400) { res = b.buf; break; }
+        if (rc == CURLE_OK && http_code >= 400 && http_code < 500) break; /* client error */
+        if (i < 2) sqt_sleep_ms(500 * (unsigned)(i + 1));
+    }
+    if (!res) free(b.buf);
+    return res;
+}
+
+long http_get_file(const char *url, const char *path) {
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    CURL *c = curl_new(60L);
+    if (!c) { fclose(f); remove(path); return -1; }
+    curl_easy_setopt(c, CURLOPT_URL,           url);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_file);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,     f);
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+    long sz = (long)ftell(f);
+    fclose(f);
+    if (rc != CURLE_OK || http_code < 200 || http_code >= 400) { remove(path); return -1; }
+    return sz > 0 ? sz : -1;
+}
+
+char *http_post(const char *url, const char *json_body) {
+    Buf b = {malloc(4096), 0, 4096};
+    if (!b.buf) return NULL;
+    CURL *c = curl_new(15L);
+    if (!c) { free(b.buf); return NULL; }
+    struct curl_slist *hdrs = curl_slist_append(NULL, "Content-Type: application/json");
+    curl_easy_setopt(c, CURLOPT_URL,            url);
+    curl_easy_setopt(c, CURLOPT_POSTFIELDS,     json_body ? json_body : "");
+    curl_easy_setopt(c, CURLOPT_HTTPHEADER,     hdrs);
+    curl_easy_setopt(c, CURLOPT_WRITEFUNCTION,  curl_write_buf);
+    curl_easy_setopt(c, CURLOPT_WRITEDATA,      &b);
+    CURLcode rc = curl_easy_perform(c);
+    long http_code = 0;
+    curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(c);
+    curl_slist_free_all(hdrs);
+    if (rc == CURLE_OK && http_code >= 200 && http_code < 400) return b.buf;
+    free(b.buf); return NULL;
+}
+
+#else  /* !SQT_USE_CURL — original popen/curl-CLI path */
+
+void http_init(void)    { /* no-op */ }
+void http_cleanup(void) { /* no-op */ }
 
 static void urlencode(const char *in, char *out, size_t outsz) {
     static const char hex[] = "0123456789ABCDEF";
@@ -277,13 +407,45 @@ char *http_post(const char *url, const char *json_body) {
     return popen_read(cmd);
 }
 
+#endif /* SQT_USE_CURL */
 #endif /* _WIN32 */
 
 // api stuff — Qobuz native
 
 #define QBZ_API    "https://www.qobuz.com/api.json/0.2"
-#define QBZ_APP_ID "712109809"
-#define QBZ_SECRET "589be88e4538daea11f509d29e4a23b1"
+
+/* Credentials are XOR-obfuscated (key = 0xA5 ^ index) to avoid plaintext in binary.
+   Generate replacements: for each char c at index i, store c ^ (0xA5 ^ i). */
+static const unsigned char QBZ_OBF_ID[] = {
+    0x92,0x95,0x95,0x97,0x91,0x99,0x9B,0x92,0x94
+};
+static const unsigned char QBZ_OBF_SEC[] = {
+    0x90,0x9C,0x9E,0xC4,0xC4,0x98,0x9B,0xC7,0x99,0x99,0x9C,0x96,
+    0xCD,0xC9,0xCE,0xCB,0x84,0x85,0xD1,0x83,0x81,0x89,0xD7,0x80,
+    0x84,0xD9,0x8B,0xDF,0x8B,0x8B,0xD9,0x8B
+};
+static void sqt_deobf(const unsigned char *in, size_t len, char *out) {
+    for (size_t i = 0; i < len; i++)
+        out[i] = (char)(in[i] ^ (0xA5u ^ (unsigned char)i));
+    out[len] = '\0';
+}
+/* ── cached credentials (#4) ─────────────────────────────────────────────────
+ * Deobfuscation is a tight loop but runs at every call site (5×). Since the
+ * values never change at runtime, compute them once and cache. */
+static char s_qbz_app_id[16] = {0};
+static char s_qbz_secret[36] = {0};
+static int  s_qbz_creds_ready = 0;
+
+/* fills app_id (≥10 bytes) and secret (≥33 bytes) */
+static void get_qbz_creds(char *app_id, char *secret) {
+    if (!s_qbz_creds_ready) {
+        sqt_deobf(QBZ_OBF_ID,  sizeof(QBZ_OBF_ID),  s_qbz_app_id);
+        sqt_deobf(QBZ_OBF_SEC, sizeof(QBZ_OBF_SEC), s_qbz_secret);
+        s_qbz_creds_ready = 1;
+    }
+    memcpy(app_id, s_qbz_app_id, sizeof(QBZ_OBF_ID) + 1);
+    memcpy(secret, s_qbz_secret, sizeof(QBZ_OBF_SEC) + 1);
+}
 
 /* forward declaration — defined in the Qobuz backend section below */
 static void md5_hex(const char *str, char out[33]);
@@ -359,18 +521,20 @@ static void fill_album_qobuz(JNode *a, Album *out) {
 }
 
 int api_search_tracks(const char *query, Track *out, int max) {
+    char app_id[16], secret[36];
+    get_qbz_creds(app_id, secret);
     char enc[1600], ts_str[32], sig[33], payload[2048], url[2048];
     urlencode(query, enc, sizeof enc);
     snprintf(ts_str, sizeof ts_str, "%ld", (long)time(NULL));
-    /* sig payload (SpotiFLAC convention): method + sorted(param_name+val) + ts + secret
+    /* sig payload (Qobuz signing convention): method + sorted(param_name+val) + ts + secret
      * params sorted alpha: limit, query */
     char lim[16]; snprintf(lim, sizeof lim, "%d", max);
     snprintf(payload, sizeof payload, "tracksearchlimit%squery%s%s%s",
-             lim, query, ts_str, QBZ_SECRET);
+             lim, query, ts_str, secret);
     md5_hex(payload, sig);
     snprintf(url, sizeof url,
              "%s/track/search?query=%s&limit=%d&app_id=%s&request_ts=%s&request_sig=%s",
-             QBZ_API, enc, max, QBZ_APP_ID, ts_str, sig);
+             QBZ_API, enc, max, app_id, ts_str, sig);
 
     char *resp = http_get(url);
     if (!resp) { SQT_LOG("qobuz search tracks: request failed"); return 0; }
@@ -390,17 +554,19 @@ int api_search_tracks(const char *query, Track *out, int max) {
 }
 
 int api_search_albums(const char *query, Album *out, int max) {
+    char app_id[16], secret[36];
+    get_qbz_creds(app_id, secret);
     char enc[1600], ts_str[32], sig[33], payload[2048], url[2048];
     urlencode(query, enc, sizeof enc);
     snprintf(ts_str, sizeof ts_str, "%ld", (long)time(NULL));
     /* params sorted alpha: limit, query */
     char lim[16]; snprintf(lim, sizeof lim, "%d", max);
     snprintf(payload, sizeof payload, "albumsearchlimit%squery%s%s%s",
-             lim, query, ts_str, QBZ_SECRET);
+             lim, query, ts_str, secret);
     md5_hex(payload, sig);
     snprintf(url, sizeof url,
              "%s/album/search?query=%s&limit=%d&app_id=%s&request_ts=%s&request_sig=%s",
-             QBZ_API, enc, max, QBZ_APP_ID, ts_str, sig);
+             QBZ_API, enc, max, app_id, ts_str, sig);
 
     char *resp = http_get(url);
     if (!resp) { SQT_LOG("qobuz search albums: request failed"); return 0; }
@@ -420,16 +586,18 @@ int api_search_albums(const char *query, Album *out, int max) {
 }
 
 int api_get_album_tracks(const char *album_id, Track *out, int max) {
+    char app_id[16], secret[36];
+    get_qbz_creds(app_id, secret);
     char enc_id[256], ts_str[32], sig[33], payload[512], url[2048];
     urlencode(album_id, enc_id, sizeof enc_id);
     snprintf(ts_str, sizeof ts_str, "%ld", (long)time(NULL));
     /* param: album_id only */
     snprintf(payload, sizeof payload, "albumgetalbum_id%s%s%s",
-             album_id, ts_str, QBZ_SECRET);
+             album_id, ts_str, secret);
     md5_hex(payload, sig);
     snprintf(url, sizeof url,
              "%s/album/get?album_id=%s&app_id=%s&request_ts=%s&request_sig=%s",
-             QBZ_API, enc_id, QBZ_APP_ID, ts_str, sig);
+             QBZ_API, enc_id, app_id, ts_str, sig);
 
     char *resp = http_get(url);
     if (!resp) { SQT_LOG("qobuz album tracks: request failed"); return 0; }
@@ -472,15 +640,17 @@ int api_get_album_tracks(const char *album_id, Track *out, int max) {
 /* Fetch full track metadata from Qobuz /track/get.
    Merges into *out — fields already set are preserved if Qobuz returns empty. */
 int api_get_track_info(const char *track_id, Track *out) {
+    char app_id[16], secret[36];
+    get_qbz_creds(app_id, secret);
     char enc_id[256], ts_str[32], sig[33], payload[512], url[2048];
     urlencode(track_id, enc_id, sizeof enc_id);
     snprintf(ts_str, sizeof ts_str, "%ld", (long)time(NULL));
     snprintf(payload, sizeof payload, "trackgettrack_id%s%s%s",
-             track_id, ts_str, QBZ_SECRET);
+             track_id, ts_str, secret);
     md5_hex(payload, sig);
     snprintf(url, sizeof url,
              "%s/track/get?track_id=%s&app_id=%s&request_ts=%s&request_sig=%s",
-             QBZ_API, enc_id, QBZ_APP_ID, ts_str, sig);
+             QBZ_API, enc_id, app_id, ts_str, sig);
 
     SQT_LOG("Fetching track info for ID: %s", track_id);
     char *resp = http_get(url);
@@ -587,7 +757,7 @@ static void md5_hex(const char *str, char out[33]) {
 /*
  * api_qobuz_get_stream_url
  *
- * Resolves a Tidal ISRC to a Qobuz direct download URL via:
+ * Resolves an ISRC to a Qobuz direct download URL via:
  *   1. Signed Qobuz track/search (ISRC → Qobuz track ID)
  *   2. POST to api.zarz.moe (Qobuz track ID → Akamai FLAC URL)
  *
@@ -598,10 +768,13 @@ int api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz) {
 
     /* 1 ── sign a Qobuz track/search request for this ISRC
      *
-     * Signature payload (SpotiFLAC convention):
+     * Signature payload (Qobuz signing convention):
      *   "tracksearch" + "limit" + "1" + "query" + <isrc> + <ts> + <secret>
      * (params sorted alphabetically, app_id/ts/sig excluded)
      */
+    char app_id[16], secret[36];
+    get_qbz_creds(app_id, secret);
+
     char enc[256];
     urlencode(isrc, enc, sizeof enc);
 
@@ -611,9 +784,9 @@ int api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz) {
     char payload[512];
     snprintf(payload, sizeof payload,
              "tracksearchlimit1query%s%s%s",
-             isrc,   /* unencoded in signature payload */
+             isrc,
              ts_str,
-             QBZ_SECRET);
+             secret);
 
     char sig[33];
     md5_hex(payload, sig);
@@ -621,7 +794,7 @@ int api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz) {
     char search_url[1024];
     snprintf(search_url, sizeof search_url,
              "%s/track/search?query=%s&limit=1&app_id=%s&request_ts=%s&request_sig=%s",
-             QBZ_API, enc, QBZ_APP_ID, ts_str, sig);
+             QBZ_API, enc, app_id, ts_str, sig);
 
     char *resp = http_get(search_url);
     if (!resp) { SQT_LOG("qobuz: search request failed"); return 0; }

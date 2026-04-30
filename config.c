@@ -85,15 +85,25 @@ int config_load(char *out_dir, size_t sz) {
     return 0;
 }
 
-// save config to disk
+// save config to disk (atomic: write to .tmp then rename)
 void config_save(const char *out_dir) {
     ensure_config_dir();
 
     char path[600];
     config_file(path, sizeof(path));
 
-    FILE *f = fopen(path, "w");
+    char tmp_path[620];
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+
+    FILE *f = fopen(tmp_path, "w");
     if (!f) return;
     fprintf(f, "out_dir=%s\n", out_dir);
     fclose(f);
+
+    /* Atomic replace — if rename fails, at least the live config is intact */
+#ifdef _WIN32
+    /* Windows rename() fails if dest exists */
+    remove(path);
+#endif
+    rename(tmp_path, path);
 }

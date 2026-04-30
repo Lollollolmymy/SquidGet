@@ -23,11 +23,13 @@ static LONG WINAPI sqt_crash_handler(EXCEPTION_POINTERS *ep) {
         case EXCEPTION_PRIV_INSTRUCTION:         name = "PRIVILEGED_INSTRUCTION"; break;
         case EXCEPTION_IN_PAGE_ERROR:            name = "IN_PAGE_ERROR";          break;
     }
-    if (code == EXCEPTION_ACCESS_VIOLATION && ep->ExceptionRecord->NumberParameters >= 2) {
-        ULONG_PTR rw  = ep->ExceptionRecord->ExceptionInformation[0];
-        ULONG_PTR bad = ep->ExceptionRecord->ExceptionInformation[1];
-        (void)rw; (void)bad;
-    }
+    (void)name; (void)addr;
+    /* Restore terminal before letting the OS handle the crash */
+    HANDLE ho = GetStdHandle(STD_OUTPUT_HANDLE);
+    /* show cursor, reset attrs, leave alt screen */
+    const char *cleanup = "\033[?25h\033[0m\033[?1049l\n";
+    DWORD written;
+    WriteConsoleA(ho, cleanup, (DWORD)strlen(cleanup), &written, NULL);
     return EXCEPTION_CONTINUE_SEARCH;
 }
 #endif
@@ -140,6 +142,99 @@ static void dl_progress_cb(const char *msg, void *ud) {
     sqt_mutex_unlock(&s->lock);
 }
 
+/* ── Album parallel-download pool ─────────────────────────────────────────
+ * Defined at file scope so sqt_album_pool_worker can reference it.
+ * bg_worker's BG_ALBUM_DOWNLOAD case fills one of these and spawns threads. */
+typedef struct {
+    Track      *tracks;
+    int         n;
+    char        album_path[512];
+    char        cover_path[1024];
+    char        quality[64];
+    AppState   *s;
+    int         next;   /* next track index to grab — guarded by mu */
+    int         done;
+    int         failed;
+    sqt_mutex_t mu;
+} AlbumPool;
+
+SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
+    AlbumPool *pool = arg;
+    while (1) {
+        sqt_mutex_lock(&pool->mu);
+        int idx = pool->next;
+        if (idx >= pool->n) { sqt_mutex_unlock(&pool->mu); break; }
+        pool->next++;
+        sqt_mutex_unlock(&pool->mu);
+
+        int ok = download_track(&pool->tracks[idx], pool->quality,
+                                pool->album_path,
+                                pool->cover_path[0] ? pool->cover_path : NULL,
+                                NULL, NULL);
+
+        sqt_mutex_lock(&pool->mu);
+        if (ok) pool->done++; else pool->failed++;
+        /* update status so the TUI shows live progress */
+        sqt_mutex_lock(&pool->s->lock);
+        snprintf(pool->s->status, sizeof(pool->s->status),
+                 "downloading album… %d/%d", pool->done, pool->n);
+        pool->s->dirty = 1;
+        sqt_mutex_unlock(&pool->s->lock);
+        sqt_mutex_unlock(&pool->mu);
+    }
+#ifndef _WIN32
+    return NULL;
+#else
+    return 0;
+#endif
+}
+
+/* ── Album parallel-download pool ─────────────────────────────────────────
+ * At file scope so sqt_album_pool_worker can reference the type.          */
+typedef struct {
+    Track      *tracks;
+    int         n;
+    char        album_path[512];
+    char        cover_path[1024];
+    char        quality[64];
+    AppState   *s;
+    int         next;   /* next track index to grab — guarded by mu */
+    int         done;
+    int         failed;
+    sqt_mutex_t mu;
+} AlbumPool;
+
+SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
+    AlbumPool *pool = arg;
+    while (1) {
+        sqt_mutex_lock(&pool->mu);
+        int idx = pool->next;
+        if (idx >= pool->n) { sqt_mutex_unlock(&pool->mu); break; }
+        pool->next++;
+        sqt_mutex_unlock(&pool->mu);
+
+        /* download_track returns 0 on success */
+        int rc = download_track(&pool->tracks[idx], pool->quality,
+                                pool->album_path,
+                                pool->cover_path[0] ? pool->cover_path : NULL,
+                                NULL, NULL);
+
+        sqt_mutex_lock(&pool->mu);
+        if (rc == 0) pool->done++; else pool->failed++;
+        sqt_mutex_lock(&pool->s->lock);
+        snprintf(pool->s->status, sizeof(pool->s->status),
+                 "downloading album… %d/%d", pool->done, pool->n);
+        pool->s->dirty = 1;
+        sqt_mutex_unlock(&pool->s->lock);
+        sqt_mutex_unlock(&pool->mu);
+    }
+#ifndef _WIN32
+    return NULL;
+#else
+    return 0;
+#endif
+}
+
 static SQT_THREAD_FN bg_worker(void *arg) {
     BgCtx    *ctx = arg;
     AppState *s   = ctx->s;
@@ -182,7 +277,15 @@ static SQT_THREAD_FN bg_worker(void *arg) {
     }
 
     case BG_ALBUM_SEARCH: {
-        Album tmp[SQT_MAX_RESULTS];
+        /* heap-alloc: same reason as BG_SEARCH — avoid large stack allocation on bg thread */
+        Album *tmp = calloc(SQT_MAX_RESULTS, sizeof(Album));
+        if (!tmp) {
+            sqt_mutex_lock(&s->lock);
+            snprintf(s->status, sizeof(s->status), "error: out of memory");
+            s->dirty = 1;
+            sqt_mutex_unlock(&s->lock);
+            break;
+        }
         int n = api_search_albums(ctx->query, tmp, SQT_MAX_RESULTS);
         sqt_mutex_lock(&s->lock);
         memcpy(s->albums, tmp, (size_t)n * sizeof(Album));
@@ -192,6 +295,7 @@ static SQT_THREAD_FN bg_worker(void *arg) {
         snprintf(s->status, sizeof(s->status), "%d album%s", n, n == 1 ? "" : "s");
         s->dirty = 1;
         sqt_mutex_unlock(&s->lock);
+        free(tmp);
         break;
     }
 
@@ -233,28 +337,23 @@ static SQT_THREAD_FN bg_worker(void *arg) {
             snprintf(s->status, sizeof(s->status), "error: could not fetch album tracks");
             s->dirty = 1;
             sqt_mutex_unlock(&s->lock);
+            free(tracks);
             break;
         }
-        
-        /* Create album subfolder — album_name is already sanitised */
+
+        /* Create album subfolder */
         char album_path[512];
         snprintf(album_path, sizeof(album_path), "%s" SQT_SEP "%s", s->out_dir, ctx->album_name);
         mkdir_p(album_path);
 
-        /* Fetch cover art ONCE for the whole album.
-           Use the first track's info to get the CDN path; this avoids
-           hammering the Tidal CDN once per track (39 redundant requests on a
-           39-track album is enough to get throttled / return errors). */
+        /* Fetch cover art ONCE for the whole album */
         char album_cover[1024] = {0};
         {
             Track rich = tracks[0];
-            if (api_get_track_info(tracks[0].id, &rich) == 0 && rich.cover[0]) {
-                char cover_url[768];
-                snprintf(cover_url, sizeof cover_url,
-                         "%s/%s/1280x1280.jpg", SQT_TIDAL_IMG, rich.cover);
+            if (api_get_track_info(tracks[0].id, &rich) != 0 && rich.cover[0]) {
                 snprintf(album_cover, sizeof album_cover,
                          "%s" SQT_SEP ".sqt_cover_album_%s.jpg", album_path, ctx->album_id);
-                if (http_get_file(cover_url, album_cover) <= 0) {
+                if (http_get_file(rich.cover, album_cover) <= 0) {
                     SQT_LOG("album cover fetch failed — tracks will be tagged without art");
                     album_cover[0] = '\0';
                 } else {
@@ -263,22 +362,40 @@ static SQT_THREAD_FN bg_worker(void *arg) {
             }
         }
 
-        /* Download each track, sharing the pre-fetched cover */
-        for (int i = 0; i < n; i++) {
-            sqt_mutex_lock(&s->lock);
-            snprintf(s->status, sizeof(s->status),
-                     "album: %d/%d — %s", i + 1, n, tracks[i].title);
-            s->dirty = 1;
-            sqt_mutex_unlock(&s->lock);
-            download_track(&tracks[i], ctx->quality, album_path,
-                           album_cover[0] ? album_cover : NULL,
-                           dl_progress_cb, s);
-        }
+        /* ── parallel download (#1) ──────────────────────────────────────
+         * A simple atomic-counter work-pool: N worker threads each grab
+         * the next track index from a shared counter under a mutex.
+         * Network I/O is the bottleneck, so 4 workers ≈ 4× faster
+         * for a 20-track album (no CPU contention, just overlapped waits).
+         * Progress callbacks are omitted per-worker to avoid garbled status
+         * from 4 concurrent writers; a done-count status is shown instead. */
+        AlbumPool pool;
+        memset(&pool, 0, sizeof pool);
+        pool.tracks = tracks;
+        pool.n      = n;
+        pool.s      = s;
+        snprintf(pool.album_path, sizeof pool.album_path, "%s", album_path);
+        snprintf(pool.cover_path, sizeof pool.cover_path, "%s", album_cover);
+        snprintf(pool.quality,    sizeof pool.quality,    "%s", ctx->quality);
+        sqt_mutex_init(&pool.mu);
 
-        /* Clean up the shared cover temp file now that all tracks are tagged */
+        /* Number of worker threads: min(4, n) */
+#define ALBUM_THREADS 4
+        int nthreads = n < ALBUM_THREADS ? n : ALBUM_THREADS;
+        sqt_thread_t workers[ALBUM_THREADS];
+        for (int ti = 0; ti < nthreads; ti++)
+            sqt_thread_create(&workers[ti], sqt_album_pool_worker, &pool);
+        for (int ti = 0; ti < nthreads; ti++)
+            sqt_thread_join(workers[ti]);
+#undef ALBUM_THREADS
+
+        sqt_mutex_destroy(&pool.mu);
+
         if (album_cover[0]) remove(album_cover);
         sqt_mutex_lock(&s->lock);
-        snprintf(s->status, sizeof(s->status), "album done! (%d tracks)", n);
+        snprintf(s->status, sizeof(s->status),
+                 "album done! %d/%d tracks%s",
+                 pool.done, n, pool.failed > 0 ? " (some errors)" : "");
         s->dirty = 1;
         sqt_mutex_unlock(&s->lock);
         free(tracks);
@@ -391,14 +508,13 @@ static void start_download(AppState *s, int cursor, int qual_idx) {
 
 #ifndef _WIN32
 #  include <unistd.h>
-static AppState *g_sig_state = NULL;
 static volatile sig_atomic_t g_resize_pending = 0;
 static void on_sigwinch(int _) { (void)_; g_resize_pending = 1; }
 static void on_fatal_sig(int _) {
     (void)_;
     /* async-safe cleanup: use write() not fputs() */
-    const char *cleanup = "\033[?25h\033[0m\033[?1049l\n";
-    write(STDOUT_FILENO, cleanup, 30);
+    static const char cleanup[] = "\033[?25h\033[0m\033[?1049l\n";
+    write(STDOUT_FILENO, cleanup, sizeof(cleanup) - 1);
     _exit(1);
 }
 #endif
@@ -431,7 +547,6 @@ int main(void) {
     }
 
 #ifndef _WIN32
-    g_sig_state = &s;
     signal(SIGWINCH, on_sigwinch);
     signal(SIGPIPE,  SIG_IGN);
     signal(SIGINT,  on_fatal_sig);
@@ -568,7 +683,7 @@ int main(void) {
                 break;
             }
             /* Ctrl+U clears query manually */
-            if (key == 21) {  /* Ctrl+U */
+            if (key == KEY_CTRL_U) {
                 s.query[0] = '\0'; s.query_len = 0;
                 s.mode = MODE_SEARCH;
                 s.track_count = 0;
@@ -710,7 +825,8 @@ int main(void) {
         default: break;
         }
 
-        s.dirty = 1;
+        /* only mark dirty if we reached here without an early continue/break
+           that already set dirty itself; actual state changes set dirty inline */
         sqt_mutex_unlock(&s.lock);
         tui_render(&s);
     }

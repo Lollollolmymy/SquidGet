@@ -79,6 +79,13 @@ static void build_out_path(const Track *t, const char *out_dir,
     }
 }
 
+/* Returns 1 if the track already has all key metadata fields populated,
+   meaning a redundant api_get_track_info call can be skipped. */
+static int track_is_fully_populated(const Track *t) {
+    return t->title[0] && t->artist[0] && t->album[0] &&
+           t->isrc[0]  && t->cover[0];
+}
+
 /* fetch cover art, tag the file, clean up temp cover */
 static void tag_and_clean(const Track *t, const char *final_out,
                            const char *out_dir,
@@ -86,7 +93,11 @@ static void tag_and_clean(const Track *t, const char *final_out,
                            void (*progress_cb)(const char *msg, void *ud),
                            void *ud) {
     Track rich = *t;
-    (void)api_get_track_info(t->id, &rich);
+    /* Skip redundant network fetch when all key fields are already present
+       (e.g. album mode: api_get_album_tracks already returned full metadata) */
+    if (!track_is_fully_populated(t)) {
+        (void)api_get_track_info(t->id, &rich);
+    }
 
     char cover_tmp[1024] = {0};
     int cover_owned = 0;
@@ -103,7 +114,8 @@ static void tag_and_clean(const Track *t, const char *final_out,
 
     if (progress_cb) progress_cb("tagging...", ud);
     int tag_ret = sqt_tag(final_out, &rich, cover_tmp[0] ? cover_tmp : NULL);
-    (void)tag_ret;
+    if (tag_ret != 0 && progress_cb)
+        progress_cb("warning: tagging failed (file still saved)", ud);
 
     if (cover_tmp[0] && cover_owned) remove(cover_tmp);
 }

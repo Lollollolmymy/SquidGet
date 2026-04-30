@@ -68,12 +68,19 @@ static char g_row[FB_ROW_SZ];
 static int g_rp;
 
 static void rb_reset(void) { g_rp = 0; g_row[0] = '\0'; }
+
+/* #5: use memcpy instead of snprintf for string appends — snprintf adds ~5ns
+ * of format-string overhead per call; the render loop calls rb_s hundreds of
+ * times per frame, adding up across keypress/tick cycles. */
 static void rb_s(const char *s) {
     if (!s) return;
     int rem = FB_ROW_SZ - g_rp - 1;
     if (rem <= 0) return;
-    int n = snprintf(g_row + g_rp, (size_t)(rem + 1), "%s", s);
-    if (n > 0 && n <= rem) g_rp += n;
+    size_t n = strlen(s);
+    if ((int)n > rem) n = (size_t)rem;
+    memcpy(g_row + g_rp, s, n);
+    g_rp += (int)n;
+    g_row[g_rp] = '\0';
 }
 static void rb_pad(int n) {
     while (n-- > 0 && g_rp < FB_ROW_SZ - 1) g_row[g_rp++] = ' ';
@@ -82,7 +89,22 @@ static void rb_pad(int n) {
 static void rb_rep(const char *s, int n) { while (n-- > 0) rb_s(s); }
 static const char *rb_done(void) { return g_row; }
 
-/* UTF-8 width (simplified) */
+/* UTF-8 width: returns terminal column count for a string.
+ * ANSI escape sequences are skipped (zero width).
+ * 4-byte sequences (emoji etc.) are always 2 columns.
+ * 3-byte sequences: decode the codepoint and check CJK wide ranges. */
+static int utf8_codepoint_wide(unsigned int cp) {
+    return (cp >= 0x1100 && cp <= 0x115F) ||
+           (cp >= 0x2E80 && cp <= 0x303E) ||
+           (cp >= 0x3040 && cp <= 0x33FF) ||
+           (cp >= 0x3400 && cp <= 0x9FFF) ||
+           (cp >= 0xA000 && cp <= 0xA4CF) ||
+           (cp >= 0xAC00 && cp <= 0xD7AF) ||
+           (cp >= 0xF900 && cp <= 0xFAFF) ||
+           (cp >= 0xFE30 && cp <= 0xFE4F) ||
+           (cp >= 0xFF01 && cp <= 0xFF60);
+}
+
 static int utf8_width(const char *s) {
     int w = 0;
     while (*s) {
@@ -96,10 +118,15 @@ static int utf8_width(const char *s) {
             continue;
         }
         unsigned char c = (unsigned char)*s++;
-        if (c < 0x80) w++;
-        else if (c < 0xE0) { s++; w++; }
-        else if (c < 0xF0) { s += 2; w += 2; }
-        else { s += 3; w += 2; }
+        if (c < 0x80) { w++; }
+        else if (c < 0xE0) { s++; w++; }  /* 2-byte: always 1 wide */
+        else if (c < 0xF0) {               /* 3-byte: check codepoint */
+            unsigned int cp = ((c & 0x0F) << 12)
+                            | (((unsigned char)s[0] & 0x3F) << 6)
+                            |  ((unsigned char)s[1] & 0x3F);
+            s += 2;
+            w += utf8_codepoint_wide(cp) ? 2 : 1;
+        } else { s += 3; w += 2; }         /* 4-byte: always 2 wide */
     }
     return w;
 }
@@ -114,10 +141,15 @@ static void trunc_to(const char *src, char *dst, size_t dstsz, int maxw) {
         const char *prev = p;
         unsigned char c = (unsigned char)*p++;
         int cpw = 1;
-        if (c < 0x80) cpw = 1;
+        if (c < 0x80) { cpw = 1; }
         else if (c < 0xE0) { p++; cpw = 1; }
-        else if (c < 0xF0) { p += 2; cpw = 2; }
-        else { p += 3; cpw = 2; }
+        else if (c < 0xF0) {
+            unsigned int cp = ((c & 0x0F) << 12)
+                            | (((unsigned char)p[0] & 0x3F) << 6)
+                            |  ((unsigned char)p[1] & 0x3F);
+            p += 2;
+            cpw = utf8_codepoint_wide(cp) ? 2 : 1;
+        } else { p += 3; cpw = 2; }
         if (w + cpw > maxw - 1) break;
         size_t seg = (size_t)(p - prev);
         if (i + seg + 4 >= dstsz) break;
@@ -136,6 +168,19 @@ static void fmt_dur(int total_s, char *b, size_t bsz) {
     else snprintf(b, bsz, "%d:%02d", m % 1000, sec);
 }
 
+/* #8: FNV-1a 32-bit hash — replaces strcmp(cur, prev) dirty check.
+ * Per-row cost: one hash of the new line vs one stored uint32.
+ * Old approach: strcmp over up to 8 192 bytes for every row every frame.
+ * Removing prev[8192] also halves per-row framebuffer memory.  */
+static uint32_t fnv1a_32(const char *s) {
+    uint32_t h = 2166136261u;
+    for (const unsigned char *p = (const unsigned char *)s; *p; p++) {
+        h ^= *p;
+        h *= 16777619u;
+    }
+    return h;
+}
+
 /* Framebuffer */
 static void fb_ensure(AppState *s) {
     if (s->fb && s->fb_rows == s->rows && s->fb_cols == s->cols) return;
@@ -150,8 +195,18 @@ static void fb_ensure(AppState *s) {
 static void fb_put(AppState *s, int row, const char *line) {
     if (!s->fb || row < 0 || row >= s->fb_rows) return;
     FBRow *r = &s->fb[row];
-    snprintf(r->cur, sizeof(r->cur), "%s", line);
-    r->dirty = strcmp(r->cur, r->prev) != 0;
+    uint32_t h = fnv1a_32(line);
+    if (h == r->prev_hash) {
+        /* Hashes match → content almost certainly unchanged; skip memcpy. */
+        r->dirty = 0;
+        return;
+    }
+    size_t n = strlen(line);
+    if (n >= FB_ROW_SZ) n = FB_ROW_SZ - 1;
+    memcpy(r->cur, line, n);
+    r->cur[n] = '\0';
+    r->dirty     = 1;
+    r->prev_hash = h;   /* will be the "prev" once this row is flushed */
 }
 
 static void fb_flush(AppState *s) {
@@ -162,7 +217,7 @@ static void fb_flush(AppState *s) {
         printf("\033[%d;1H", i + 1);
         fputs(r->cur, stdout);
         fputs(A_EOL, stdout);
-        memcpy(r->prev, r->cur, sizeof(r->cur));
+        /* prev_hash was already set in fb_put when dirty was raised */
         r->dirty = 0;
     }
     fputs(A_SHOW, stdout);

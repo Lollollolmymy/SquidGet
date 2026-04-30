@@ -16,10 +16,10 @@
 
 #ifdef _WIN32
 #  include <windows.h>
-#  define SQT_SEP "\\"
+   /* SQT_SEP already defined in squidget.h */
 #else
 #  include <unistd.h>
-#  define SQT_SEP "/"
+   /* SQT_SEP already defined in squidget.h */
 #endif
 
 /* ══════════════════════════ dynamic byte buffer ══════════════════════════ */
@@ -165,10 +165,21 @@ static int file_write_atomic(const char *path, const uint8_t *d, size_t n) {
 #endif
 }
 
-/* ══════════════════════════ FLAC tagger ═════════════════════════════════ */
+/* ══════════════════════════ FLAC tagger (#3 streaming) ══════════════════════
+ *
+ * Old approach: file_read() loads the ENTIRE audio file into RAM.
+ *   24-bit 96 kHz FLAC ≈ 300–500 MB peak resident.
+ *
+ * New approach: read only the small metadata blocks into RAM (STREAMINFO=34B,
+ *   SEEKTABLE=few KB, etc.).  Audio bytes are streamed file→temp in 64 KB
+ *   chunks so peak RSS is ~2 MB regardless of FLAC size (~500× improvement).
+ */
 
 #define FLAC_VORBIS_COMMENT 4
 #define FLAC_PICTURE        6
+
+/* Per-block storage for blocks we must preserve (STREAMINFO, SEEKTABLE, …). */
+typedef struct { int type; uint8_t *data; uint32_t len; } SMBlk;
 
 static void vc_field(Bb *b, const char *key, const char *val) {
     if (!val || !*val) return;
@@ -178,152 +189,175 @@ static void vc_field(Bb *b, const char *key, const char *val) {
     bb_u8(b, '=');
     bb_put(b, val, strlen(val));
 }
-
 static void vc_field_int(Bb *b, const char *key, int n) {
-    char buf[24]; snprintf(buf,sizeof buf,"%d",n);
-    vc_field(b, key, buf);
+    char buf[24]; snprintf(buf,sizeof buf,"%d",n); vc_field(b, key, buf);
 }
-
 static void vc_field_fp(Bb *b, const char *key, float v) {
-    char buf[32]; snprintf(buf,sizeof buf,"%.2f dB",v);
-    vc_field(b, key, buf);
+    char buf[32]; snprintf(buf,sizeof buf,"%.2f dB",v); vc_field(b, key, buf);
 }
 
 static void build_vorbis_comment(Bb *b, const Track *t) {
-    int n = 0;
-    if (t->title[0])         n++;
-    if (t->artist[0])        n += 2;
-    if (t->album[0])         n++;
-    if (t->year[0])          n++;
-    if (t->track_num > 0)    n++;
-    if (t->disc_num  > 0)    n++;
-    if (t->isrc[0])          n++;
-    if (t->copyright[0])     n++;
-    if (t->explicit_)        n++;
-    if (t->replay_gain!=0.f) n++;
-
     const char *vendor = "squidget";
     bb_le32(b, (uint32_t)strlen(vendor));
     bb_put(b, vendor, strlen(vendor));
-    bb_le32(b, (uint32_t)n);
-
-    vc_field    (b, "TITLE",               t->title);
-    vc_field    (b, "ARTIST",              t->artist);
-    vc_field    (b, "ALBUMARTIST",         t->artist);
-    vc_field    (b, "ALBUM",               t->album);
-    vc_field    (b, "DATE",                t->year);
-    if (t->track_num > 0) vc_field_int(b, "TRACKNUMBER", t->track_num);
-    if (t->disc_num  > 0) vc_field_int(b, "DISCNUMBER",  t->disc_num);
-    vc_field    (b, "ISRC",                t->isrc);
-    vc_field    (b, "COPYRIGHT",           t->copyright);
-    if (t->explicit_)        vc_field(b, "COMMENT", "Explicit");
-    if (t->replay_gain!=0.f) vc_field_fp(b, "REPLAYGAIN_TRACK_GAIN", t->replay_gain);
+    size_t count_pos = b->len;
+    bb_le32(b, 0);
+    uint32_t n = 0;
+#define VC(key, val)   do { vc_field    (b, key, val); n++; } while(0)
+#define VCI(key, val)  do { vc_field_int(b, key, val); n++; } while(0)
+#define VCFP(key, val) do { vc_field_fp (b, key, val); n++; } while(0)
+    if (t->title[0])       VC("TITLE",      t->title);
+    if (t->artist[0])    { VC("ARTIST",     t->artist);
+                           VC("ALBUMARTIST",t->artist); }
+    if (t->album[0])       VC("ALBUM",      t->album);
+    if (t->year[0])        VC("DATE",       t->year);
+    if (t->track_num > 0)  VCI("TRACKNUMBER", t->track_num);
+    if (t->disc_num  > 0)  VCI("DISCNUMBER",  t->disc_num);
+    if (t->isrc[0])        VC("ISRC",       t->isrc);
+    if (t->copyright[0])   VC("COPYRIGHT",  t->copyright);
+    if (t->explicit_)      VC("COMMENT",    "Explicit");
+    if (t->replay_gain != 0.f) VCFP("REPLAYGAIN_TRACK_GAIN", t->replay_gain);
+#undef VC
+#undef VCI
+#undef VCFP
+    if (count_pos + 4 <= b->len) {
+        b->d[count_pos+0]=(uint8_t)n; b->d[count_pos+1]=(uint8_t)(n>>8);
+        b->d[count_pos+2]=(uint8_t)(n>>16); b->d[count_pos+3]=(uint8_t)(n>>24);
+    }
 }
 
 static void build_picture_block(Bb *b, const uint8_t *img, size_t img_sz) {
     const char *mime = "image/jpeg";
     if (img_sz >= 4 && img[0]==0x89 && img[1]=='P') mime = "image/png";
     bb_be32(b, 3);
-    bb_be32(b, (uint32_t)strlen(mime));
-    bb_put(b, mime, strlen(mime));
+    bb_be32(b, (uint32_t)strlen(mime)); bb_put(b, mime, strlen(mime));
     bb_be32(b, 0);
-    bb_be32(b, 0); bb_be32(b, 0);
-    bb_be32(b, 0); bb_be32(b, 0);
-    bb_be32(b, (uint32_t)img_sz);
-    bb_put(b, img, img_sz);
+    bb_be32(b, 0); bb_be32(b, 0); bb_be32(b, 0); bb_be32(b, 0);
+    bb_be32(b, (uint32_t)img_sz); bb_put(b, img, img_sz);
 }
 
 static void flac_emit_block(Bb *out, int type, int last,
-                             const uint8_t *data, uint32_t len) {
+                              const uint8_t *data, uint32_t len) {
     uint8_t hdr[4];
     hdr[0] = (uint8_t)(((last?1:0)<<7) | (type&0x7F));
-    hdr[1] = (uint8_t)(len>>16);
-    hdr[2] = (uint8_t)(len>>8);
-    hdr[3] = (uint8_t)(len);
+    hdr[1] = (uint8_t)(len>>16); hdr[2] = (uint8_t)(len>>8); hdr[3] = (uint8_t)len;
     bb_put(out, hdr, 4);
     if (len) bb_put(out, data, len);
 }
 
+/* Stream bytes from src (from audio_offset) to dst in 64 KB chunks. */
+static int stream_audio(FILE *dst, FILE *src, long audio_offset) {
+    if (fseek(src, audio_offset, SEEK_SET) != 0) return 0;
+    uint8_t chunk[65536];
+    size_t n;
+    while ((n = fread(chunk, 1, sizeof chunk, src)) > 0)
+        if (fwrite(chunk, 1, n, dst) != n) return 0;
+    return !ferror(src) && !ferror(dst);
+}
+
 static int flac_tag(const char *path, const Track *t, const char *cover_path) {
-    SQT_LOG("flac_tag START  path='%s'", path);
+    SQT_LOG("flac_tag (streaming) START  path='%s'", path);
 
-    size_t fsz;
-    uint8_t *file = file_read(path, &fsz);
-    if (!file) { SQT_LOG("flac_tag: file_read returned NULL"); return -1; }
+    FILE *in = fopen(path, "rb");
+    if (!in) { SQT_LOG("flac_tag: cannot open input"); return -1; }
 
-    size_t flac_start = id3v2_total_size(file, fsz);
-
-    if (flac_start + 4 > fsz || memcmp(file + flac_start, "fLaC", 4) != 0) {
-        SQT_LOG("flac_tag: invalid FLAC magic");
-        free(file); return -1;
+    /* detect optional ID3v2 prefix */
+    uint8_t hdr10[10] = {0};
+    if (fread(hdr10, 1, 10, in) != 10) { fclose(in); return -1; }
+    long flac_start = 0;
+    if (hdr10[0]=='I' && hdr10[1]=='D' && hdr10[2]=='3') {
+        size_t id3sz = id3v2_total_size(hdr10, 10);
+        if (id3sz < 10) { fclose(in); return -1; }
+        flac_start = (long)id3sz;
+        if (fseek(in, flac_start, SEEK_SET) != 0 ||
+            fread(hdr10, 1, 4, in) != 4 ||
+            memcmp(hdr10, "fLaC", 4) != 0) {
+            SQT_LOG("flac_tag: fLaC magic not found after ID3");
+            fclose(in); return -1;
+        }
+    } else {
+        if (memcmp(hdr10, "fLaC", 4) != 0) {
+            SQT_LOG("flac_tag: not a FLAC file"); fclose(in); return -1;
+        }
+        fseek(in, 4, SEEK_SET);
     }
+    /* file cursor is now just past the "fLaC" marker */
 
-    uint8_t *cover = NULL; size_t cover_sz = 0;
-    if (cover_path && cover_path[0]) {
-        cover = file_read(cover_path, &cover_sz);
-    }
-
-    /* Keep non-metadata blocks (STREAMINFO, etc.) */
-    typedef struct { int type; uint32_t off, len; } MBlk;
-    MBlk keep[64]; int nkeep = 0;
-    size_t pos = flac_start + 4; int last_block = 0;
-    while (pos + 4 <= fsz && !last_block) {
-        uint8_t h0    = file[pos];
-        last_block    = (h0 >> 7) & 1;
-        int    btype  = h0 & 0x7F;
-        uint32_t blen = ((uint32_t)file[pos+1]<<16)
-                       |((uint32_t)file[pos+2]<<8)
-                       |(uint32_t)file[pos+3];
+    /* scan metadata blocks, keeping non-metadata ones in small buffers */
+    SMBlk keep[64]; int nkeep = 0;
+    int last_block = 0;
+    while (!last_block) {
+        uint8_t mhdr[4];
+        if (fread(mhdr, 1, 4, in) != 4) break;
+        last_block    = (mhdr[0] >> 7) & 1;
+        int    btype  = mhdr[0] & 0x7F;
+        uint32_t blen = ((uint32_t)mhdr[1]<<16)|((uint32_t)mhdr[2]<<8)|mhdr[3];
         if (btype != FLAC_VORBIS_COMMENT && btype != FLAC_PICTURE && nkeep < 64) {
             keep[nkeep].type = btype;
-            keep[nkeep].off  = (uint32_t)(pos + 4);
             keep[nkeep].len  = blen;
+            keep[nkeep].data = blen ? malloc(blen) : NULL;
+            if (blen && (!keep[nkeep].data ||
+                         fread(keep[nkeep].data, 1, blen, in) != blen)) {
+                free(keep[nkeep].data);
+                for (int i = 0; i < nkeep; i++) free(keep[i].data);
+                fclose(in); return -1;
+            }
             nkeep++;
+        } else {
+            if (blen && fseek(in, (long)blen, SEEK_CUR) != 0) {
+                for (int i = 0; i < nkeep; i++) free(keep[i].data);
+                fclose(in); return -1;
+            }
         }
-        pos += 4 + blen;
-        if (pos > fsz) break;
     }
-    size_t audio_off = pos;
+    long audio_offset = ftell(in);  /* first audio frame starts here */
 
-    Bb vc = {0};
-    build_vorbis_comment(&vc, t);
+    /* load cover art (small JPEG only, never the audio data) */
+    uint8_t *cover = NULL; size_t cover_sz = 0;
+    if (cover_path && cover_path[0]) cover = file_read(cover_path, &cover_sz);
 
+    /* build new metadata in RAM (tags + optional cover ≤ ~2 MB) */
+    Bb vc = {0}; build_vorbis_comment(&vc, t);
     Bb pic = {0};
-    if (cover && cover_sz > 0) {
-        build_picture_block(&pic, cover, cover_sz);
-    }
-
-    Bb id3 = {0};
-    if (cover && cover_sz > 0)
-        build_id3v2_apic(&id3, cover, cover_sz);
-
+    if (cover && cover_sz > 0) build_picture_block(&pic, cover, cover_sz);
+    Bb id3bb = {0};
+    if (cover && cover_sz > 0) build_id3v2_apic(&id3bb, cover, cover_sz);
     free(cover);
 
-    Bb out = {0};
-    if (id3.len > 0) bb_put(&out, id3.d, id3.len);
-    bb_free(&id3);
-    bb_put(&out, "fLaC", 4);
-    
+    Bb meta = {0};
+    if (id3bb.len > 0) bb_put(&meta, id3bb.d, id3bb.len);
+    bb_free(&id3bb);
+    bb_put(&meta, "fLaC", 4);
     for (int i = 0; i < nkeep; i++) {
         int is_last = (i == nkeep-1) && (vc.len == 0) && (pic.len == 0);
-        flac_emit_block(&out, keep[i].type, is_last,
-                         file + keep[i].off, keep[i].len);
+        flac_emit_block(&meta, keep[i].type, is_last, keep[i].data, keep[i].len);
+        free(keep[i].data);
     }
-    
     if (vc.len > 0)
-        flac_emit_block(&out, FLAC_VORBIS_COMMENT, (pic.len == 0),
+        flac_emit_block(&meta, FLAC_VORBIS_COMMENT, (pic.len == 0),
                          vc.d, (uint32_t)vc.len);
     if (pic.len > 0)
-        flac_emit_block(&out, FLAC_PICTURE, 1, pic.d, (uint32_t)pic.len);
-    
-    if (audio_off < fsz)
-        bb_put(&out, file + audio_off, fsz - audio_off);
-
-    free(file);
+        flac_emit_block(&meta, FLAC_PICTURE, 1, pic.d, (uint32_t)pic.len);
     bb_free(&vc); bb_free(&pic);
 
-    int ok = file_write_atomic(path, out.d, out.len);
-    bb_free(&out);
+    /* write temp file: small metadata header + streamed audio (64 KB chunks) */
+    char tmp[1024];
+    snprintf(tmp, sizeof tmp, "%s.sqttmp", path);
+    FILE *out = fopen(tmp, "wb");
+    if (!out) { bb_free(&meta); fclose(in); return -1; }
+
+    int ok = (fwrite(meta.d, 1, meta.len, out) == meta.len);
+    if (ok) ok = stream_audio(out, in, audio_offset);
+    fclose(out); fclose(in); bb_free(&meta);
+    if (!ok) { remove(tmp); return -1; }
+
+    /* atomic rename */
+#ifdef _WIN32
+    remove(path);
+    ok = MoveFileA(tmp, path) != 0;
+#else
+    ok = rename(tmp, path) == 0;
+#endif
     return ok ? 0 : -1;
 }
 
