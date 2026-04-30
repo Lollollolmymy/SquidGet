@@ -189,52 +189,6 @@ SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
 #endif
 }
 
-/* ── Album parallel-download pool ─────────────────────────────────────────
- * At file scope so sqt_album_pool_worker can reference the type.          */
-typedef struct {
-    Track      *tracks;
-    int         n;
-    char        album_path[512];
-    char        cover_path[1024];
-    char        quality[64];
-    AppState   *s;
-    int         next;   /* next track index to grab — guarded by mu */
-    int         done;
-    int         failed;
-    sqt_mutex_t mu;
-} AlbumPool;
-
-SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
-    AlbumPool *pool = arg;
-    while (1) {
-        sqt_mutex_lock(&pool->mu);
-        int idx = pool->next;
-        if (idx >= pool->n) { sqt_mutex_unlock(&pool->mu); break; }
-        pool->next++;
-        sqt_mutex_unlock(&pool->mu);
-
-        /* download_track returns 0 on success */
-        int rc = download_track(&pool->tracks[idx], pool->quality,
-                                pool->album_path,
-                                pool->cover_path[0] ? pool->cover_path : NULL,
-                                NULL, NULL);
-
-        sqt_mutex_lock(&pool->mu);
-        if (rc == 0) pool->done++; else pool->failed++;
-        sqt_mutex_lock(&pool->s->lock);
-        snprintf(pool->s->status, sizeof(pool->s->status),
-                 "downloading album… %d/%d", pool->done, pool->n);
-        pool->s->dirty = 1;
-        sqt_mutex_unlock(&pool->s->lock);
-        sqt_mutex_unlock(&pool->mu);
-    }
-#ifndef _WIN32
-    return NULL;
-#else
-    return 0;
-#endif
-}
-
 static SQT_THREAD_FN bg_worker(void *arg) {
     BgCtx    *ctx = arg;
     AppState *s   = ctx->s;

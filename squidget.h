@@ -27,10 +27,18 @@
 
 /* quality labels */
 #define QUAL_HIR  "HI_RES_LOSSLESS"
+#define QUAL_LOS  "LOSSLESS"
 #define QUAL_HIGH "HIGH"
+#define QUAL_LOW  "LOW"
+#define QUAL_ATM  "DOLBY_ATMOS"
 
-#define QUALITY_COUNT 1
+#define QUALITY_COUNT 5
 extern const char *const QUALITY_LABELS[QUALITY_COUNT];
+
+/* API base URL — override at build time: -DSQT_BASE_API=\"https://your.api\" */
+#ifndef SQT_BASE_API
+#  define SQT_BASE_API ""
+#endif
 
 /* ── Search type ── */
 typedef enum {
