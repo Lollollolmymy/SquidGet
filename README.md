@@ -93,7 +93,8 @@ It runs natively on **macOS**, **Linux**, and **Windows** using only the tools y
 
 | Platform | Requirement |
 |---|---|
-| **macOS** | Xcode Command Line Tools (`xcode-select --install`) + `curl` (pre-installed) |
+| **macOS (Homebrew)** | `brew` — [install Homebrew](https://brew.sh) if you don't have it |
+| **macOS (source)** | Xcode Command Line Tools (`xcode-select --install`) + `curl` (pre-installed) |
 | **Linux** | `gcc` + `curl` (install via your package manager) |
 | **Windows** | MinGW-w64 or MSVC — the `.bat` build script handles the rest |
 
@@ -101,6 +102,19 @@ It runs natively on **macOS**, **Linux**, and **Windows** using only the tools y
 > No additional C libraries are needed. SquidGet uses only the C standard library and platform HTTP APIs.
 
 ### <a name="installation"></a> Installation
+
+#### 🍺 macOS — Homebrew (Recommended)
+
+The easiest way to install on macOS. No security prompts, no manual steps — Homebrew handles everything including adding SquidGet to your Applications.
+
+```bash
+brew tap Lollollolmymy/squidget
+brew install squidget
+```
+
+After install, `squidget` is available in your terminal and **SquidGet.app** will appear in Launchpad / Spotlight.
+
+#### 🐧 Linux / macOS — Build from Source
 
 **1. Clone the repository**
 ```bash
@@ -113,14 +127,19 @@ cd SquidGet
 ```bash
 # macOS / Linux
 ./build.sh
-
-# Windows (Command Prompt)
-squidget.bat
 ```
 
 The build script auto-detects your OS, installs missing tools if needed (Linux only), compiles with `gcc -O2`, and launches the app immediately.
 
-**3. First-run setup**
+#### 🪟 Windows
+
+```bat
+git clone https://github.com/Lollollolmymy/SquidGet.git
+cd SquidGet
+squidget.bat
+```
+
+#### First-run setup
 
 On first launch, SquidGet presents a save-location wizard. Pick a preset directory or browse for a custom folder. Your choice is saved for future sessions.
 
