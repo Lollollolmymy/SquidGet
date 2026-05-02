@@ -103,30 +103,13 @@ It runs natively on **macOS**, **Linux**, and **Windows** using only the tools y
 
 ### <a name="installation"></a> Installation
 
-Choose your preferred installation method:
-
----
-
-#### 📦 Package Managers (Recommended)
-
-<<<<<<< HEAD
 #### 📦 Package Managers
-=======
-<!-- Package Manager Badges -->
-[![Chocolatey](https://img.shields.io/chocolatey/v/squidget?style=for-the-badge&logo=chocolatey)](https://chocolatey.org/packages/squidget)
-[![Homebrew](https://img.shields.io/badge/dynamic/json?url=https://raw.githubusercontent.com/Lollollolmymy/homebrew-squidget/main/squidget.rb&query=$.version&label=homebrew&style=for-the-badge&logo=homebrew&color=blue)](https://github.com/Lollollolmymy/homebrew-squidget)
-[![Winget](https://img.shields.io/badge/dynamic/json?url=https://api.github.com/repos/microsoft/winget-pkgs/contents/manifests/l/Lollollolmymy/SquidGet/1.0.0/Lollollolmymy.SquidGet.yaml&query=$.PackageVersion&label=winget&style=for-the-badge&logo=windows&color=0078d7)](https://github.com/microsoft/winget-pkgs/pull/367831)
->>>>>>> df0453e3072f1a697e561a85d04ba03610678003
 
-| Platform | Command | Description |
-|----------|---------|-------------|
-| **Windows** | `choco install squidget` | 🍫 Chocolatey |
-| **macOS** | `brew tap Lollollolmymy/squidget && brew install squidget` | 🍺 Homebrew |
-<<<<<<< HEAD
-| **Linux** | `./build.sh` | � Build from Source |
-=======
-| **Linux** | `wget -O- https://package-url | bash` | 📦 Coming Soon |
->>>>>>> df0453e3072f1a697e561a85d04ba03610678003
+| Platform | Command |
+|----------|---------|
+| **Windows** | `choco install squidget` |
+| **macOS** | `brew tap Lollollolmymy/squidget && brew install squidget` |
+| **Linux** | `./build.sh` |
 
 ---
 
