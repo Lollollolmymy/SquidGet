@@ -112,6 +112,7 @@ brew install squidget
 
 #### 🪟 Windows — Chocolatey
 
+```cmd
 Download from releases or run squidget.bat
 ```
 
