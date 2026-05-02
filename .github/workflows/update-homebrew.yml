@@ -1,0 +1,60 @@
+name: Update Homebrew Formula
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+
+jobs:
+  update-homebrew:
+    runs-on: macos-latest
+    steps:
+    - name: Checkout SquidGet
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PAT }}
+
+    - name: Checkout Homebrew Tap
+      uses: actions/checkout@v4
+      with:
+        repository: Lollollolmymy/homebrew-squidget
+        token: ${{ secrets.PAT }}
+        path: homebrew-tap
+
+    - name: Download binary and calculate SHA256
+      run: |
+        # Get the latest release tag
+        RELEASE_TAG=$(curl -s https://api.github.com/repos/Lollollolmymy/SquidGet/releases/latest | grep '"tag_name"' | cut -d'"' -f4)
+        echo "Release tag: $RELEASE_TAG"
+        
+        # Download the binary
+        curl -L "https://github.com/Lollollolmymy/SquidGet/releases/download/$RELEASE_TAG/squidget-MacOs" -o squidget-MacOs
+        
+        # Calculate SHA256
+        SHA256=$(shasum -a 256 squidget-MacOs | cut -d' ' -f1)
+        echo "SHA256: $SHA256"
+        echo "NEW_SHA256=$SHA256" >> $GITHUB_ENV
+
+    - name: Update Homebrew formula
+      run: |
+        cd homebrew-tap
+        
+        # Update SHA256 in the formula
+        sed -i.bak "s/sha256 \".*\"/sha256 \"$NEW_SHA256\"/" squidget.rb
+        rm squidget.rb.bak
+        
+        # Update version if needed
+        sed -i.bak "s/version \".*\"/version \"$RELEASE_TAG\"/" squidget.rb
+        rm squidget.rb.bak
+        
+        echo "Updated formula:"
+        cat squidget.rb
+
+    - name: Commit and push changes
+      run: |
+        cd homebrew-tap
+        git config --local user.email "action@github.com"
+        git config --local user.name "GitHub Action"
+        git add squidget.rb
+        git diff --staged --quiet || git commit -m "Update squidget to $RELEASE_TAG"
+        git push
