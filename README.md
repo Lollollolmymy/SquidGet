@@ -103,87 +103,26 @@ It runs natively on **macOS**, **Linux**, and **Windows** using only the tools y
 
 ### <a name="installation"></a> Installation
 
-#### 📦 Package Managers
+#### � macOS — Homebrew
 
-| Platform | Command |
-|----------|---------|
-| **Windows** | `choco install squidget` |
-| **macOS** | `brew tap Lollollolmymy/squidget && brew install squidget` |
-| **Linux** | `./build.sh` |
-
----
-
-#### 🍎 macOS
-
-##### Homebrew (Recommended)
 ```bash
 brew tap Lollollolmymy/squidget
 brew install squidget
 ```
-✅ **Benefits:** Auto-updates, no security prompts, adds to Launchpad/Spotlight
 
-##### Build from Source
-```bash
-git clone https://github.com/Lollollolmymy/SquidGet.git
-cd SquidGet
-./build.sh
-```
-✅ **Benefits:** Latest features, universal binary (Intel + Apple Silicon)
+#### 🪟 Windows — Chocolatey
 
----
-
-#### 🪟 Windows
-
-##### Chocolatey (Recommended)
 ```cmd
 choco install squidget
 ```
-✅ **Benefits:** Auto-updates, desktop shortcut, PATH integration
 
-##### Build from Source
-```bat
-git clone https://github.com/Lollollolmymy/SquidGet.git
-cd SquidGet
-squidget.bat
-```
-✅ **Benefits:** Latest features, portable executable
+#### 🐧 Linux — Build from Source
 
----
-
-#### 🐧 Linux
-
-##### Build from Source
 ```bash
 git clone https://github.com/Lollollolmymy/SquidGet.git
 cd SquidGet
 ./build.sh
 ```
-✅ **Benefits:** Works on all distributions, minimal dependencies
-
----
-
-#### 🚀 Quick Start
-
-After installation, launch SquidGet:
-
-```bash
-# All platforms
-squidget
-```
-
-**First-run setup:** SquidGet will ask for a download location. Choose a preset or custom folder — this setting is saved for future sessions.
-
----
-
-#### 📋 Installation Features
-
-| Feature | Windows | macOS | Linux |
-|---------|---------|--------|-------|
-| **Desktop Shortcut** | ✅ | ✅ | ❌ |
-| **PATH Integration** | ✅ | ✅ | ✅ |
-| **Auto-updates** | ✅ | ✅ | ❌ |
-| **Universal Binary** | ❌ | ✅ | ❌ |
-| **Portable Install** | ✅ | ✅ | ✅ |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
