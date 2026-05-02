@@ -103,45 +103,93 @@ It runs natively on **macOS**, **Linux**, and **Windows** using only the tools y
 
 ### <a name="installation"></a> Installation
 
-#### 🍺 macOS — Homebrew (Recommended)
+Choose your preferred installation method:
 
-The easiest way to install on macOS. No security prompts, no manual steps — Homebrew handles everything including adding SquidGet to your Applications.
+---
 
+#### 📦 Package Managers (Recommended)
+
+#### 📦 Package Managers
+
+| Platform | Command | Description |
+|----------|---------|-------------|
+| **Windows** | `choco install squidget` | 🍫 Chocolatey |
+| **macOS** | `brew tap Lollollolmymy/squidget && brew install squidget` | 🍺 Homebrew |
+| **Linux** | `./build.sh` | � Build from Source |
+
+---
+
+#### 🍎 macOS
+
+##### Homebrew (Recommended)
 ```bash
 brew tap Lollollolmymy/squidget
 brew install squidget
 ```
+✅ **Benefits:** Auto-updates, no security prompts, adds to Launchpad/Spotlight
 
-After install, `squidget` is available in your terminal and **SquidGet.app** will appear in Launchpad / Spotlight.
-
-#### 🐧 Linux / macOS — Build from Source
-
-**1. Clone the repository**
+##### Build from Source
 ```bash
 git clone https://github.com/Lollollolmymy/SquidGet.git
 cd SquidGet
-```
-
-**2. Build and run**
-
-```bash
-# macOS / Linux
 ./build.sh
 ```
+✅ **Benefits:** Latest features, universal binary (Intel + Apple Silicon)
 
-The build script auto-detects your OS, installs missing tools if needed (Linux only), compiles with `gcc -O2`, and launches the app immediately.
+---
 
 #### 🪟 Windows
 
+##### Chocolatey (Recommended)
+```cmd
+choco install squidget
+```
+✅ **Benefits:** Auto-updates, desktop shortcut, PATH integration
+
+##### Build from Source
 ```bat
 git clone https://github.com/Lollollolmymy/SquidGet.git
 cd SquidGet
 squidget.bat
 ```
+✅ **Benefits:** Latest features, portable executable
 
-#### First-run setup
+---
 
-On first launch, SquidGet presents a save-location wizard. Pick a preset directory or browse for a custom folder. Your choice is saved for future sessions.
+#### 🐧 Linux
+
+##### Build from Source
+```bash
+git clone https://github.com/Lollollolmymy/SquidGet.git
+cd SquidGet
+./build.sh
+```
+✅ **Benefits:** Works on all distributions, minimal dependencies
+
+---
+
+#### 🚀 Quick Start
+
+After installation, launch SquidGet:
+
+```bash
+# All platforms
+squidget
+```
+
+**First-run setup:** SquidGet will ask for a download location. Choose a preset or custom folder — this setting is saved for future sessions.
+
+---
+
+#### 📋 Installation Features
+
+| Feature | Windows | macOS | Linux |
+|---------|---------|--------|-------|
+| **Desktop Shortcut** | ✅ | ✅ | ❌ |
+| **PATH Integration** | ✅ | ✅ | ✅ |
+| **Auto-updates** | ✅ | ✅ | ❌ |
+| **Universal Binary** | ❌ | ✅ | ❌ |
+| **Portable Install** | ✅ | ✅ | ✅ |
 
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
 
