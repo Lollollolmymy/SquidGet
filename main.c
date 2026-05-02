@@ -173,7 +173,7 @@ SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
                                 NULL, NULL);
 
         sqt_mutex_lock(&pool->mu);
-        if (ok) pool->done++; else pool->failed++;
+        if (ok == 0) pool->done++; else pool->failed++;
         /* update status so the TUI shows live progress */
         sqt_mutex_lock(&pool->s->lock);
         snprintf(pool->s->status, sizeof(pool->s->status),
