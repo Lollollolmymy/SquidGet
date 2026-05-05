@@ -3,10 +3,6 @@
 #include <stddef.h>
 #include <stdint.h>   /* uint32_t */
 
-#ifndef SQT_LOG
-#  define SQT_LOG(...) ((void)0)
-#endif
-
 /* ── Path separator (used by download.c and main.c) ── */
 #ifndef _WIN32
 #  define SQT_SEP "/"
@@ -34,11 +30,6 @@
 
 #define QUALITY_COUNT 5
 extern const char *const QUALITY_LABELS[QUALITY_COUNT];
-
-/* API base URL — override at build time: -DSQT_BASE_API=\"https://your.api\" */
-#ifndef SQT_BASE_API
-#  define SQT_BASE_API ""
-#endif
 
 /* ── Search type ── */
 typedef enum {
@@ -77,6 +68,7 @@ typedef struct {
 typedef enum {
     MODE_SEARCH = 0,   /* typing a query                   */
     MODE_RESULTS,      /* browsing track/album list         */
+    MODE_ALBUM_TRACKS, /* browsing tracks of an album       */
     MODE_QUALITY,      /* picking download quality          */
     MODE_SETUP,        /* first-run save-location UI        */
     MODE_ALBUM_ACTION, /* download album or browse songs    */

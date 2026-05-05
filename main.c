@@ -262,9 +262,8 @@ static SQT_THREAD_FN bg_worker(void *arg) {
             memcpy(s->tracks, tmp, (size_t)n * sizeof(Track));
             s->track_count = n;
             s->cursor = s->scroll = 0;
-            s->search_type = SEARCH_SONGS;
-            s->mode        = MODE_RESULTS;
-            snprintf(s->status, sizeof(s->status), "%d track%s  (TAB to return to album search)", n, n == 1 ? "" : "s");
+            s->mode        = MODE_ALBUM_TRACKS;
+            snprintf(s->status, sizeof(s->status), "%d track%s", n, n == 1 ? "" : "s");
             s->dirty = 1;
             sqt_mutex_unlock(&s->lock);
             free(tmp);
@@ -348,10 +347,7 @@ static SQT_THREAD_FN bg_worker(void *arg) {
 
 static void push_task(AppState *s, const SQTTask *t) {
     sqt_mutex_lock(&s->lock);
-    
-    /* if it's a search task, we might want to cancel pending searches? 
-       for now, let's just push it. */
-    
+
     if (s->q_count >= SQT_MAX_QUEUE) {
         snprintf(s->status, sizeof(s->status), "error: queue full");
         s->dirty = 1;
@@ -457,7 +453,6 @@ int main(void) {
     AppState s;
     memset(&s, 0, sizeof(s));
     sqt_mutex_init(&s.lock);
-    SQT_LOG("AppState size=%zu  mutex initialised", sizeof(s));
 
     // check if configured
     if (config_load(&s)) {
@@ -647,7 +642,8 @@ int main(void) {
         /* ── quality picker ── */
         case MODE_QUALITY: {
             if (key == KEY_ESC) {
-                s.mode = MODE_RESULTS; s.dirty = 1; break;
+                s.mode = s.prev_mode == MODE_ALBUM_TRACKS ? MODE_ALBUM_TRACKS : MODE_RESULTS;
+                s.dirty = 1; break;
             }
             if ((key == KEY_UP || key == 'k') && s.qual_cursor > 0) {
                 s.qual_cursor--; s.dirty = 1; break;
@@ -668,7 +664,7 @@ int main(void) {
             if (key == KEY_ENTER || (key >= '1' && key <= '0' + QUALITY_COUNT)) {
                 int qi     = s.qual_cursor;
                 int cursor = s.cursor;
-                s.mode  = MODE_RESULTS;
+                s.mode  = s.prev_mode == MODE_ALBUM_TRACKS ? MODE_ALBUM_TRACKS : MODE_RESULTS;
                 s.dirty = 1;
                 sqt_mutex_unlock(&s.lock);
                 start_download(&s, cursor, qi);
@@ -699,6 +695,81 @@ int main(void) {
                 if (action == 0) start_album_download(&s, cursor);
                 else             start_album_track_browse(&s, cursor);
                 continue;
+            }
+            break;
+        }
+
+        /* ── album track browser ── */
+        case MODE_ALBUM_TRACKS: {
+            if (key == KEY_ESC) {
+                s.mode = MODE_RESULTS; s.cursor = 0; s.scroll = 0; s.dirty = 1; break;
+            }
+            if (key == '?') {
+                s.prev_mode = s.mode;
+                s.mode = MODE_HELP;
+                s.dirty = 1;
+                break;
+            }
+            if (key == KEY_UP) {
+                if (s.cursor > 0) {
+                    s.cursor--;
+                    if (s.cursor < s.scroll) s.scroll = s.cursor;
+                    s.dirty = 1;
+                }
+                break;
+            }
+            if (key == KEY_DOWN) {
+                if (s.cursor < s.track_count - 1) {
+                    s.cursor++;
+                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
+                    if (s.cursor >= s.scroll + vis) s.scroll = s.cursor - vis + 1;
+                    s.dirty = 1;
+                }
+                break;
+            }
+            if (key == KEY_HOME) { s.cursor = 0; s.scroll = 0; s.dirty = 1; break; }
+            if (key == KEY_END) {
+                if (s.track_count > 0) {
+                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
+                    s.cursor = s.track_count - 1;
+                    if (s.cursor >= s.scroll + vis) s.scroll = s.cursor - vis + 1;
+                    s.dirty = 1;
+                }
+                break;
+            }
+            if (key == KEY_PGUP) {
+                int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
+                s.cursor = s.cursor > vis ? s.cursor - vis : 0;
+                if (s.cursor < s.scroll) s.scroll = s.cursor;
+                s.dirty = 1;
+                break;
+            }
+            if (key == KEY_PGDN) {
+                if (s.track_count > 0) {
+                    int vis = s.rows - HEADER_ROWS - FOOTER_ROWS - 1;
+                    s.cursor += vis;
+                    if (s.cursor >= s.track_count) s.cursor = s.track_count - 1;
+                    if (s.cursor >= s.scroll + vis) s.scroll = s.cursor - vis + 1;
+                    s.dirty = 1;
+                }
+                break;
+            }
+            if (key == KEY_ENTER) {
+                if (s.cursor >= 0 && s.cursor < s.track_count) {
+                    if (s.default_quality >= 0) {
+                        int qi     = s.default_quality;
+                        int cursor = s.cursor;
+                        s.dirty = 1;
+                        sqt_mutex_unlock(&s.lock);
+                        start_download(&s, cursor, qi);
+                        continue;
+                    }
+                    s.prev_mode = MODE_ALBUM_TRACKS;
+                    s.mode = MODE_QUALITY;
+                    s.qual_cursor = 0;
+                    s.dirty = 1;
+                }
+                break;
             }
             break;
         }
@@ -789,7 +860,6 @@ int main(void) {
     }
 
     tui_cleanup(&s);
-    SQT_LOG("tui cleaned up, joining bg thread if running");
 
     sqt_mutex_lock(&s.lock);
     int was_running = s.bg_running;

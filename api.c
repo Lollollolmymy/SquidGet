@@ -1,6 +1,3 @@
-#ifdef SQT_DEBUG
-#  define SQT_LOG(...) fprintf(stderr, "[sqt] " __VA_ARGS__), fprintf(stderr, "\n")
-#endif
 #include "squidget.h"
 #include "json.h"
 #include <stdlib.h>
@@ -29,10 +26,6 @@ static int buf_ensure(Buf *b, size_t extra) {
     b->buf = nb; b->cap = nc; return 1;
 }
 
-/* ── WINDOWS: WinHTTP ── */
-#ifdef _WIN32
-#include <windows.h>
-#include <winhttp.h>
 
 // url encode for query params
 static void urlencode(const char *in, char *out, size_t outsz) {
@@ -50,6 +43,11 @@ static void urlencode(const char *in, char *out, size_t outsz) {
     }
     out[j] = '\0';
 }
+
+/* ── WINDOWS: WinHTTP ── */
+#ifdef _WIN32
+#include <windows.h>
+#include <winhttp.h>
 
 static int wh_do(const char *url, Buf *body, FILE *fp, DWORD toms) {
     // large url buffer for stream URLs
@@ -259,6 +257,20 @@ void http_cleanup(void) {
     curl_global_cleanup();
 }
 
+
+typedef struct {
+    void (*cb)(size_t, size_t, void *);
+    void *ud;
+} CurlProg;
+
+static int curl_progress_cb(void *ud, curl_off_t dltotal, curl_off_t dlnow, 
+                            curl_off_t ultotal, curl_off_t ulnow) {
+    (void)ultotal; (void)ulnow;
+    CurlProg *p = ud;
+    if (p && p->cb) p->cb((size_t)dlnow, (size_t)dltotal, p->ud);
+    return 0;
+}
+
 /* write callbacks */
 static size_t curl_write_buf(char *ptr, size_t sz, size_t n, void *ud) {
     Buf *b = ud;
@@ -357,22 +369,6 @@ char *http_post(const char *url, const char *json_body) {
 
 void http_init(void)    { /* no-op */ }
 void http_cleanup(void) { /* no-op */ }
-
-static void urlencode(const char *in, char *out, size_t outsz) {
-    static const char hex[] = "0123456789ABCDEF";
-    size_t j = 0;
-    for (const unsigned char *p = (const unsigned char *)in; *p && j + 3 < outsz; p++) {
-        if ((*p>='A'&&*p<='Z')||(*p>='a'&&*p<='z')||(*p>='0'&&*p<='9')
-            ||*p=='-'||*p=='_'||*p=='.'||*p=='~') {
-            out[j++] = (char)*p;
-        } else {
-            out[j++] = '%';
-            out[j++] = hex[*p >> 4];
-            out[j++] = hex[*p & 0xF];
-        }
-    }
-    out[j] = '\0';
-}
 
 // escape single quotes for shell
 static void shell_escape(const char *in, char *out, size_t outsz) {
@@ -623,9 +619,9 @@ int api_search_tracks(const char *query, Track *out, int max) {
              QBZ_API, enc, max, app_id, ts_str, sig);
 
     char *resp = http_get(url);
-    if (!resp) { SQT_LOG("qobuz search tracks: request failed"); return 0; }
+    if (!resp) return 0;
     JNode *root = json_parse(resp); free(resp);
-    if (!root) { SQT_LOG("qobuz search tracks: parse failed"); return 0; }
+    if (!root) return 0;
 
     JNode *tracks = jobj_get(root, "tracks");
     JNode *items  = tracks ? jobj_get(tracks, "items") : NULL;
@@ -634,7 +630,6 @@ int api_search_tracks(const char *query, Track *out, int max) {
         int n = items->arr.len < max ? items->arr.len : max;
         for (int i = 0; i < n; i++) fill_track_qobuz(items->arr.items[i], &out[cnt++]);
     }
-    SQT_LOG("api_search_tracks: returning %d tracks", cnt);
     json_free(root);
     return cnt;
 }
@@ -655,9 +650,9 @@ int api_search_albums(const char *query, Album *out, int max) {
              QBZ_API, enc, max, app_id, ts_str, sig);
 
     char *resp = http_get(url);
-    if (!resp) { SQT_LOG("qobuz search albums: request failed"); return 0; }
+    if (!resp) return 0;
     JNode *root = json_parse(resp); free(resp);
-    if (!root) { SQT_LOG("qobuz search albums: parse failed"); return 0; }
+    if (!root) return 0;
 
     JNode *albs  = jobj_get(root, "albums");
     JNode *items = albs ? jobj_get(albs, "items") : NULL;
@@ -666,7 +661,6 @@ int api_search_albums(const char *query, Album *out, int max) {
         int n = items->arr.len < max ? items->arr.len : max;
         for (int i = 0; i < n; i++) fill_album_qobuz(items->arr.items[i], &out[cnt++]);
     }
-    SQT_LOG("api_search_albums: returning %d albums", cnt);
     json_free(root);
     return cnt;
 }
@@ -686,9 +680,9 @@ int api_get_album_tracks(const char *album_id, Track *out, int max) {
              QBZ_API, enc_id, app_id, ts_str, sig);
 
     char *resp = http_get(url);
-    if (!resp) { SQT_LOG("qobuz album tracks: request failed"); return 0; }
+    if (!resp) return 0;
     JNode *root = json_parse(resp); free(resp);
-    if (!root) { SQT_LOG("qobuz album tracks: parse failed"); return 0; }
+    if (!root) return 0;
 
     /* hoist album-level fields to fill in tracks that lack them */
     char album_name[256] = {0}, album_cover[512] = {0}, album_year[8] = {0};
@@ -718,7 +712,6 @@ int api_get_album_tracks(const char *album_id, Track *out, int max) {
             cnt++;
         }
     }
-    SQT_LOG("api_get_album_tracks: returning %d tracks", cnt);
     json_free(root);
     return cnt;
 }
@@ -738,11 +731,10 @@ int api_get_track_info(const char *track_id, Track *out) {
              "%s/track/get?track_id=%s&app_id=%s&request_ts=%s&request_sig=%s",
              QBZ_API, enc_id, app_id, ts_str, sig);
 
-    SQT_LOG("Fetching track info for ID: %s", track_id);
     char *resp = http_get(url);
-    if (!resp) { SQT_LOG("Failed to fetch track info"); return 0; }
+    if (!resp) return 0;
     JNode *root = json_parse(resp); free(resp);
-    if (!root) { SQT_LOG("Failed to parse track info JSON"); return 0; }
+    if (!root) return 0;
 
     Track fresh;
     fill_track_qobuz(root, &fresh);
@@ -883,16 +875,15 @@ int api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz) {
              QBZ_API, enc, app_id, ts_str, sig);
 
     char *resp = http_get(search_url);
-    if (!resp) { SQT_LOG("qobuz: search request failed"); return 0; }
+    if (!resp) return 0;
 
     JNode *root = json_parse(resp); free(resp);
-    if (!root) { SQT_LOG("qobuz: search parse failed"); return 0; }
+    if (!root) return 0;
 
     JNode *tracks = jobj_get(root, "tracks");
     JNode *items  = tracks ? jobj_get(tracks, "items") : NULL;
     if (!items || items->type != J_ARR || items->arr.len == 0) {
-        SQT_LOG("qobuz: no results for ISRC %s", isrc);
-        json_free(root);
+            json_free(root);
         return 0;
     }
 
@@ -905,8 +896,7 @@ int api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz) {
         snprintf(qobuz_id, sizeof qobuz_id, "%s", jstr(id_node));
     json_free(root);
 
-    if (!qobuz_id[0]) { SQT_LOG("qobuz: missing track id in search result"); return 0; }
-    SQT_LOG("qobuz: ISRC %s → id %s", isrc, qobuz_id);
+    if (!qobuz_id[0]) return 0;
 
     /* 2 ── POST to zarz.moe for the direct stream URL */
     char body[256];
@@ -916,14 +906,13 @@ int api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz) {
              qobuz_id);
 
     char *zresp = http_post(ZARZ_URL, body);
-    if (!zresp) { SQT_LOG("qobuz: zarz request failed"); return 0; }
+    if (!zresp) return 0;
 
     JNode *zroot = json_parse(zresp); free(zresp);
-    if (!zroot) { SQT_LOG("qobuz: zarz parse failed"); return 0; }
+    if (!zroot) return 0;
 
     JNode *ok_node = jobj_get(zroot, "success");
     if (!ok_node || ok_node->type != J_BOOL || !ok_node->b) {
-        SQT_LOG("qobuz: zarz error: %s", jstr(jobj_get(zroot, "error")));
         json_free(zroot);
         return 0;
     }
@@ -933,7 +922,6 @@ int api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz) {
     if (got) snprintf(out_url, sz, "%s", dl);
     json_free(zroot);
 
-    if (!got) { SQT_LOG("qobuz: no download_url in zarz response"); return 0; }
-    SQT_LOG("qobuz: got stream URL for id %s", qobuz_id);
+    if (!got) return 0;
     return 1;
 }

@@ -33,11 +33,21 @@ case "$OS" in
             echo "Error: curl is required"
             exit 1
         fi
+
+        # Compile with libcurl if available
+        CURL_FLAGS=""
+        if command -v pkg-config &> /dev/null && pkg-config --exists libcurl; then
+            CURL_FLAGS=$(pkg-config --cflags --libs libcurl)
+            echo "[squidget] libcurl found via pkg-config, enabling..."
+        elif [ -d "/opt/homebrew/opt/curl" ]; then
+            CURL_FLAGS="-I/opt/homebrew/opt/curl/include -L/opt/homebrew/opt/curl/lib -lcurl"
+            echo "[squidget] libcurl found via Homebrew, enabling..."
+        fi
         
         # Compile
-        gcc -std=c11 -Wall -Wextra -O2 -g \
+        gcc -std=c11 -Wall -Wextra -O2 \
             main.c api.c download.c tui.c json.c config.c platform.c tag.c \
-            -lpthread -o squidget
+            -lpthread $CURL_FLAGS -DSQT_USE_CURL -o squidget
         
         echo "[squidget] done."
         ./squidget
@@ -65,21 +75,31 @@ case "$OS" in
         if ! command -v curl &> /dev/null; then
             echo "Installing curl..."
             if command -v apt &> /dev/null; then
-                sudo apt update && sudo apt install -y curl
+                sudo apt update && sudo apt install -y curl libcurl4-openssl-dev pkg-config
             elif command -v pacman &> /dev/null; then
-                sudo pacman -S curl
+                sudo pacman -S curl curl pkg-config
             elif command -v dnf &> /dev/null; then
-                sudo dnf install -y curl
+                sudo dnf install -y curl libcurl-devel pkg-config
             else
                 echo "Error: Could not install curl. Please install it manually."
                 exit 1
             fi
         fi
+
+        # Compile with libcurl if available
+        CURL_FLAGS=""
+        if command -v pkg-config &> /dev/null && pkg-config --exists libcurl; then
+            CURL_FLAGS=$(pkg-config --cflags --libs libcurl)
+            echo "[squidget] libcurl found via pkg-config, enabling..."
+        elif [ -d "/opt/homebrew/opt/curl" ]; then
+            CURL_FLAGS="-I/opt/homebrew/opt/curl/include -L/opt/homebrew/opt/curl/lib -lcurl"
+            echo "[squidget] libcurl found via Homebrew, enabling..."
+        fi
         
         # Compile
-        gcc -std=c11 -Wall -Wextra -O2 -g \
+        gcc -std=c11 -Wall -Wextra -O2 \
             main.c api.c download.c tui.c json.c config.c platform.c tag.c \
-            -lpthread -o squidget
+            -lpthread $CURL_FLAGS -DSQT_USE_CURL -o squidget
         
         echo "[squidget] done."
         ./squidget

@@ -144,27 +144,6 @@ static uint8_t *file_read(const char *path, size_t *out_sz) {
     return buf;
 }
 
-static int file_write_atomic(const char *path, const uint8_t *d, size_t n) {
-    SQT_LOG("file_write_atomic: writing %zu bytes to %s", n, path);
-    char tmp[1024];
-    snprintf(tmp, sizeof tmp, "%s.sqttmp", path);
-    FILE *f = fopen(tmp, "wb");
-    if (!f) { SQT_LOG("file_write_atomic: cannot open temp file %s", tmp); return 0; }
-    int ok = ((size_t)fwrite(d, 1, n, f) == n);
-    fclose(f);
-    if (!ok) { remove(tmp); return 0; }
-#ifdef _WIN32
-    remove(path);
-    int ret = MoveFileA(tmp, path) != 0;
-    if (!ret) SQT_LOG("file_write_atomic: MoveFileA failed le=%lu", GetLastError());
-    return ret;
-#else
-    int ret = rename(tmp, path) == 0;
-    if (!ret) SQT_LOG("file_write_atomic: rename failed");
-    return ret;
-#endif
-}
-
 /* ══════════════════════════ FLAC tagger (#3 streaming) ══════════════════════
  *
  * Old approach: file_read() loads the ENTIRE audio file into RAM.
@@ -257,10 +236,9 @@ static int stream_audio(FILE *dst, FILE *src, long audio_offset) {
 }
 
 static int flac_tag(const char *path, const Track *t, const char *cover_path) {
-    SQT_LOG("flac_tag (streaming) START  path='%s'", path);
 
     FILE *in = fopen(path, "rb");
-    if (!in) { SQT_LOG("flac_tag: cannot open input"); return -1; }
+    if (!in) return -1;
 
     /* detect optional ID3v2 prefix */
     uint8_t hdr10[10] = {0};
@@ -273,12 +251,11 @@ static int flac_tag(const char *path, const Track *t, const char *cover_path) {
         if (fseek(in, flac_start, SEEK_SET) != 0 ||
             fread(hdr10, 1, 4, in) != 4 ||
             memcmp(hdr10, "fLaC", 4) != 0) {
-            SQT_LOG("flac_tag: fLaC magic not found after ID3");
             fclose(in); return -1;
         }
     } else {
         if (memcmp(hdr10, "fLaC", 4) != 0) {
-            SQT_LOG("flac_tag: not a FLAC file"); fclose(in); return -1;
+            fclose(in); return -1;
         }
         fseek(in, 4, SEEK_SET);
     }
@@ -530,17 +507,16 @@ static void build_meta_content(Bb *out, const Bb *ilst_data) {
 }
 
 static int m4a_tag(const char *path, const Track *t, const char *cover_path) {
-    SQT_LOG("m4a_tag (streaming) START  path='%s'", path);
 
     FILE *in = fopen(path, "rb");
-    if (!in) { SQT_LOG("m4a_tag: cannot open input"); return -1; }
+    if (!in) return -1;
 
     fseek(in, 0, SEEK_END);
     size_t fsz = (size_t)ftell(in);
     rewind(in);
 
     size_t moov_start = 0, moov_len = 0, moov_coff = 0;
-    size_t mdat_start = 0, mdat_len = 0;
+    size_t mdat_start = 0;
     uint8_t *ftyp_data = NULL; size_t ftyp_len = 0;
     uint8_t *moov_data = NULL;
 
@@ -568,7 +544,6 @@ static int m4a_tag(const char *path, const Track *t, const char *cover_path) {
             moov_coff = co;
         } else if (memcmp(ty, "mdat", 4) == 0) {
             mdat_start = cur;
-            mdat_len = sz;
         }
 
         if (sz == 0) break;
@@ -578,7 +553,6 @@ static int m4a_tag(const char *path, const Track *t, const char *cover_path) {
     if (!moov_data) {
         if (ftyp_data) free(ftyp_data);
         fclose(in);
-        SQT_LOG("m4a_tag: moov not found");
         return -1;
     }
 
@@ -679,10 +653,8 @@ static int m4a_tag(const char *path, const Track *t, const char *cover_path) {
 /* ══════════════════════════ public entry point ══════════════════════════ */
 
 int sqt_tag(const char *path, const Track *t, const char *cover_jpg) {
-    SQT_LOG("sqt_tag: path='%s'  title='%s'  cover='%s'",
-            path, t->title, cover_jpg ? cover_jpg : "(none)");
     FILE *f = fopen(path, "rb");
-    if (!f) { SQT_LOG("sqt_tag: cannot open file"); return -1; }
+    if (!f) return -1;
     uint8_t magic[10] = {0};
     size_t nr = fread(magic, 1, sizeof magic, f);
 
@@ -695,7 +667,7 @@ int sqt_tag(const char *path, const Track *t, const char *cover_jpg) {
     }
     fclose(f);
 
-    if (nr < 4) { SQT_LOG("sqt_tag: file too small nr=%zu", nr); return -1; }
+    if (nr < 4) return -1;
     
     if (memcmp(magic, "fLaC", 4) == 0) {
         return flac_tag(path, t, cover_jpg);

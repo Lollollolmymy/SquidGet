@@ -346,6 +346,7 @@ static void render_search_bar(AppState *s, int W) {
     const char *badge = 
         s->mode == MODE_SEARCH  ? (s->search_type == SEARCH_ALBUMS ? " ALBUM SEARCH " : " SONG SEARCH ") :
         s->mode == MODE_RESULTS ? (s->search_type == SEARCH_ALBUMS ? " ALBUM RESULTS " : " SONG RESULTS ") :
+        s->mode == MODE_ALBUM_TRACKS ? " ALBUM TRACKS " :
         s->mode == MODE_SETUP   ? " SETUP " :
         s->mode == MODE_HELP    ? " HELP " :
         s->mode == MODE_ALBUM_ACTION ? " ALBUM " : " QUALITY ";
@@ -420,7 +421,7 @@ static void render_list_row(AppState *s, int r, int idx, int inner, int tw, int 
     rb_s(c->border);
     rb_s(B_VL A_RST);
     
-    int total = (s->search_type == SEARCH_ALBUMS) ? s->album_count : s->track_count;
+    int total = (s->mode == MODE_ALBUM_TRACKS || s->search_type == SEARCH_SONGS) ? s->track_count : s->album_count;
     int nlist = s->rows - 5;
     if (nlist < 1) nlist = 1;
     
@@ -448,7 +449,24 @@ static void render_list_row(AppState *s, int r, int idx, int inner, int tw, int 
             rb_s("  ");
         }
         
-        if (s->search_type == SEARCH_ALBUMS) {
+        if (s->mode == MODE_ALBUM_TRACKS) {
+            char ttitl[SQT_TITLE_SZ];
+            trunc_to(s->tracks[idx].title, ttitl, sizeof(ttitl), tw);
+            if (is_sel) { rb_s(c->text_hi); rb_s(A_BOLD); } else { rb_s(C_GREY_L); }
+            rb_s(ttitl);
+            rb_pad(tw - utf8_width(ttitl) + 1);
+
+            char artst[SQT_TITLE_SZ];
+            trunc_to(s->tracks[idx].artist, artst, sizeof(artst), aw);
+            rb_s(is_sel ? c->text_hi : c->text_dim);
+            rb_s(artst);
+            rb_pad(aw - utf8_width(artst) + 1);
+
+            char dur[16];
+            snprintf(dur, sizeof(dur), "%d:%02d", s->tracks[idx].duration / 60, s->tracks[idx].duration % 60);
+            rb_s(is_sel ? c->text_hi : C_GREY_D);
+            rb_s(dur);
+        } else if (s->search_type == SEARCH_ALBUMS) {
             char atitl[SQT_TITLE_SZ];
             trunc_to(s->albums[idx].title, atitl, sizeof(atitl), tw);
             if (is_sel) { rb_s(c->text_hi); rb_s(A_BOLD); } else { rb_s(C_GREY_L); }
@@ -538,6 +556,10 @@ static void render_status_bar(AppState *s, int W) {
         kb[nkb++] = (KB){"?", "help"};
         kb[nkb++] = (KB){"^U", "clear"};
         kb[nkb++] = (KB){"tab", s->search_type == SEARCH_ALBUMS ? "songs" : "albums"};
+    } else if (s->mode == MODE_ALBUM_TRACKS) {
+        kb[nkb++] = (KB){"↑↓", "nav"};
+        kb[nkb++] = (KB){"enter", "download"};
+        kb[nkb++] = (KB){"esc", "back"};
     } else if (s->mode == MODE_QUALITY) {
         kb[nkb++] = (KB){"↑↓", "move"};
         kb[nkb++] = (KB){"1-5", "pick"};
@@ -822,7 +844,7 @@ void tui_render(AppState *s) {
     /* Render list rows based on mode */
     for (int r = 0; r < nlist; r++) {
         int idx = s->scroll + r;
-        int in_rng = (s->search_type == SEARCH_ALBUMS) ? (idx < s->album_count) : (idx < s->track_count);
+        int in_rng = (s->mode == MODE_ALBUM_TRACKS || s->search_type == SEARCH_SONGS) ? (idx < s->track_count) : (idx < s->album_count);
         int is_sel = in_rng && (idx == s->cursor);
         
         if (s->mode == MODE_SETUP) {
@@ -833,7 +855,7 @@ void tui_render(AppState *s) {
             render_album_action_row(s, r, inner, list_top);
         } else if (s->mode == MODE_HELP) {
             render_help_row(s, r, inner, list_top);
-        } else {
+        } else if (s->mode == MODE_RESULTS || s->mode == MODE_SEARCH || s->mode == MODE_ALBUM_TRACKS) {
             render_list_row(s, r, idx, inner, tw, aw, is_sel, list_top);
         }
     }
