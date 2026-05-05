@@ -124,16 +124,6 @@ static void build_setup_presets(AppState *s) {
     s->setup_cursor = 0;
 }
 
-typedef struct {
-    AppState *s;
-    char      query[512];
-    char      track_id[64];   /* SQT_ID_SZ */
-    char      album_id[64];   /* SQT_ID_SZ */
-    char      album_name[256]; /* SQT_TITLE_SZ */
-    char      quality[64];     /* SQT_QUAL_SZ */
-    enum { BG_SEARCH, BG_DOWNLOAD, BG_ALBUM_SEARCH, BG_ALBUM_TRACKS, BG_ALBUM_DOWNLOAD } task;
-} BgCtx;
-
 static void dl_progress_cb(const char *msg, void *ud) {
     AppState *s = ud;
     sqt_mutex_lock(&s->lock);
@@ -142,9 +132,6 @@ static void dl_progress_cb(const char *msg, void *ud) {
     sqt_mutex_unlock(&s->lock);
 }
 
-/* ── Album parallel-download pool ─────────────────────────────────────────
- * Defined at file scope so sqt_album_pool_worker can reference it.
- * bg_worker's BG_ALBUM_DOWNLOAD case fills one of these and spawns threads. */
 typedef struct {
     Track      *tracks;
     int         n;
@@ -152,13 +139,13 @@ typedef struct {
     char        cover_path[1024];
     char        quality[64];
     AppState   *s;
-    int         next;   /* next track index to grab — guarded by mu */
+    int         next;
     int         done;
     int         failed;
     sqt_mutex_t mu;
 } AlbumPool;
 
-SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
+static SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
     AlbumPool *pool = arg;
     while (1) {
         sqt_mutex_lock(&pool->mu);
@@ -168,13 +155,13 @@ SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
         sqt_mutex_unlock(&pool->mu);
 
         int ok = download_track(&pool->tracks[idx], pool->quality,
-                                pool->album_path,
-                                pool->cover_path[0] ? pool->cover_path : NULL,
-                                NULL, NULL);
+                                 pool->album_path,
+                                 pool->cover_path[0] ? pool->cover_path : NULL,
+                                 NULL, NULL);
 
         sqt_mutex_lock(&pool->mu);
         if (ok == 0) pool->done++; else pool->failed++;
-        /* update status so the TUI shows live progress */
+        
         sqt_mutex_lock(&pool->s->lock);
         snprintf(pool->s->status, sizeof(pool->s->status),
                  "downloading album… %d/%d", pool->done, pool->n);
@@ -190,178 +177,168 @@ SQT_THREAD_FN sqt_album_pool_worker(void *arg) {
 }
 
 static SQT_THREAD_FN bg_worker(void *arg) {
-    BgCtx    *ctx = arg;
-    AppState *s   = ctx->s;
-
-    switch (ctx->task) {
-
-    case BG_SEARCH: {
-        /* heap-alloc: Track is ~2 KB now; 200 of them = ~400 KB — too big for thread stack */
-        Track *tmp = calloc(SQT_MAX_RESULTS, sizeof(Track));
-        if (!tmp) {
-            sqt_mutex_lock(&s->lock);
-            snprintf(s->status, sizeof(s->status), "error: out of memory");
-            s->dirty = 1;
+    AppState *s = arg;
+    while (1) {
+        SQTTask t;
+        sqt_mutex_lock(&s->lock);
+        if (s->q_count == 0) {
+            s->bg_running = 0;
             sqt_mutex_unlock(&s->lock);
             break;
         }
-        int n = api_search_tracks(ctx->query, tmp, SQT_MAX_RESULTS);
-        sqt_mutex_lock(&s->lock);
-        memcpy(s->tracks, tmp, (size_t)n * sizeof(Track));
-        s->track_count = n;
-        s->cursor = s->scroll = 0;
-        s->mode   = MODE_RESULTS;
-        snprintf(s->status, sizeof(s->status), "%d track%s", n, n == 1 ? "" : "s");
-        s->dirty = 1;
+        t = s->queue[s->q_head];
+        s->q_head = (s->q_head + 1) % SQT_MAX_QUEUE;
+        s->q_count--;
         sqt_mutex_unlock(&s->lock);
-        free(tmp);
-        break;
-    }
 
-    case BG_DOWNLOAD: {
-        /* find the track by id */
-        sqt_mutex_lock(&s->lock);
-        Track t = {0};
-        for (int i = 0; i < s->track_count; i++) {
-            if (strcmp(s->tracks[i].id, ctx->track_id) == 0) { t = s->tracks[i]; break; }
-        }
-        sqt_mutex_unlock(&s->lock);
-        download_track(&t, ctx->quality, s->out_dir, NULL, dl_progress_cb, s);
-        break;
-    }
+        switch (t.type) {
 
-    case BG_ALBUM_SEARCH: {
-        /* heap-alloc: same reason as BG_SEARCH — avoid large stack allocation on bg thread */
-        Album *tmp = calloc(SQT_MAX_RESULTS, sizeof(Album));
-        if (!tmp) {
+        case TASK_SEARCH: {
+            Track *tmp = calloc(SQT_MAX_RESULTS, sizeof(Track));
+            if (!tmp) {
+                sqt_mutex_lock(&s->lock);
+                snprintf(s->status, sizeof(s->status), "error: out of memory");
+                s->dirty = 1;
+                sqt_mutex_unlock(&s->lock);
+                break;
+            }
+            int n = api_search_tracks(t.query, tmp, SQT_MAX_RESULTS);
             sqt_mutex_lock(&s->lock);
-            snprintf(s->status, sizeof(s->status), "error: out of memory");
+            memcpy(s->tracks, tmp, (size_t)n * sizeof(Track));
+            s->track_count = n;
+            s->cursor = s->scroll = 0;
+            s->mode   = MODE_RESULTS;
+            snprintf(s->status, sizeof(s->status), "%d track%s", n, n == 1 ? "" : "s");
             s->dirty = 1;
             sqt_mutex_unlock(&s->lock);
+            free(tmp);
             break;
         }
-        int n = api_search_albums(ctx->query, tmp, SQT_MAX_RESULTS);
-        sqt_mutex_lock(&s->lock);
-        memcpy(s->albums, tmp, (size_t)n * sizeof(Album));
-        s->album_count = n;
-        s->cursor = s->scroll = 0;
-        s->mode   = MODE_RESULTS;
-        snprintf(s->status, sizeof(s->status), "%d album%s", n, n == 1 ? "" : "s");
-        s->dirty = 1;
-        sqt_mutex_unlock(&s->lock);
-        free(tmp);
-        break;
-    }
 
-    case BG_ALBUM_TRACKS: {
-        Track *tmp = calloc(SQT_MAX_RESULTS, sizeof(Track));
-        if (!tmp) {
+        case TASK_DOWNLOAD: {
             sqt_mutex_lock(&s->lock);
-            snprintf(s->status, sizeof(s->status), "error: out of memory");
+            Track trk = {0};
+            for (int i = 0; i < s->track_count; i++) {
+                if (strcmp(s->tracks[i].id, t.track_id) == 0) { trk = s->tracks[i]; break; }
+            }
+            sqt_mutex_unlock(&s->lock);
+            download_track(&trk, t.quality, s->out_dir, NULL, dl_progress_cb, s);
+            break;
+        }
+
+        case TASK_ALBUM_SEARCH: {
+            Album *tmp = calloc(SQT_MAX_RESULTS, sizeof(Album));
+            if (!tmp) {
+                sqt_mutex_lock(&s->lock);
+                snprintf(s->status, sizeof(s->status), "error: out of memory");
+                s->dirty = 1;
+                sqt_mutex_unlock(&s->lock);
+                break;
+            }
+            int n = api_search_albums(t.query, tmp, SQT_MAX_RESULTS);
+            sqt_mutex_lock(&s->lock);
+            memcpy(s->albums, tmp, (size_t)n * sizeof(Album));
+            s->album_count = n;
+            s->cursor = s->scroll = 0;
+            s->mode   = MODE_RESULTS;
+            snprintf(s->status, sizeof(s->status), "%d album%s", n, n == 1 ? "" : "s");
             s->dirty = 1;
             sqt_mutex_unlock(&s->lock);
+            free(tmp);
             break;
         }
-        int n = api_get_album_tracks(ctx->album_id, tmp, SQT_MAX_RESULTS);
-        sqt_mutex_lock(&s->lock);
-        memcpy(s->tracks, tmp, (size_t)n * sizeof(Track));
-        s->track_count = n;
-        s->cursor = s->scroll = 0;
-        s->search_type = SEARCH_SONGS;
-        s->mode        = MODE_RESULTS;
-        snprintf(s->status, sizeof(s->status), "%d track%s  (TAB to return to album search)", n, n == 1 ? "" : "s");
-        s->dirty = 1;
-        sqt_mutex_unlock(&s->lock);
-        free(tmp);
-        break;
-    }
 
-    case BG_ALBUM_DOWNLOAD: {
-        Track *tracks = calloc(SQT_MAX_RESULTS, sizeof(Track));
-        if (!tracks) {
+        case TASK_ALBUM_TRACKS: {
+            Track *tmp = calloc(SQT_MAX_RESULTS, sizeof(Track));
+            if (!tmp) {
+                sqt_mutex_lock(&s->lock);
+                snprintf(s->status, sizeof(s->status), "error: out of memory");
+                s->dirty = 1;
+                sqt_mutex_unlock(&s->lock);
+                break;
+            }
+            int n = api_get_album_tracks(t.album_id, tmp, SQT_MAX_RESULTS);
             sqt_mutex_lock(&s->lock);
-            snprintf(s->status, sizeof(s->status), "error: out of memory");
+            memcpy(s->tracks, tmp, (size_t)n * sizeof(Track));
+            s->track_count = n;
+            s->cursor = s->scroll = 0;
+            s->search_type = SEARCH_SONGS;
+            s->mode        = MODE_RESULTS;
+            snprintf(s->status, sizeof(s->status), "%d track%s  (TAB to return to album search)", n, n == 1 ? "" : "s");
             s->dirty = 1;
             sqt_mutex_unlock(&s->lock);
+            free(tmp);
             break;
         }
-        int n = api_get_album_tracks(ctx->album_id, tracks, SQT_MAX_RESULTS);
-        if (n <= 0) {
+
+        case TASK_ALBUM_DOWNLOAD: {
+            Track *tracks = calloc(SQT_MAX_RESULTS, sizeof(Track));
+            if (!tracks) {
+                sqt_mutex_lock(&s->lock);
+                snprintf(s->status, sizeof(s->status), "error: out of memory");
+                s->dirty = 1;
+                sqt_mutex_unlock(&s->lock);
+                break;
+            }
+            int n = api_get_album_tracks(t.album_id, tracks, SQT_MAX_RESULTS);
+            if (n <= 0) {
+                sqt_mutex_lock(&s->lock);
+                snprintf(s->status, sizeof(s->status), "error: could not fetch album tracks");
+                s->dirty = 1;
+                sqt_mutex_unlock(&s->lock);
+                free(tracks);
+                break;
+            }
+
+            char album_path[512];
+            snprintf(album_path, sizeof(album_path), "%s" SQT_SEP "%s", s->out_dir, t.album_name);
+            mkdir_p(album_path);
+
+            char album_cover[1024] = {0};
+            {
+                Track rich = tracks[0];
+                if (api_get_track_info(tracks[0].id, &rich) != 0 && rich.cover[0]) {
+                    snprintf(album_cover, sizeof album_cover,
+                             "%s" SQT_SEP ".sqt_cover_album_%s.jpg", album_path, t.album_id);
+                    if (http_get_file(rich.cover, album_cover, NULL, NULL) <= 0) {
+                        album_cover[0] = '\0';
+                    }
+                }
+            }
+
+            AlbumPool pool;
+            memset(&pool, 0, sizeof pool);
+            pool.tracks = tracks;
+            pool.n      = n;
+            pool.s      = s;
+            snprintf(pool.album_path, sizeof pool.album_path, "%s", album_path);
+            snprintf(pool.cover_path, sizeof pool.cover_path, "%s", album_cover);
+            snprintf(pool.quality,    sizeof pool.quality,    "%s", t.quality);
+            sqt_mutex_init(&pool.mu);
+
+#define ALBUM_THREADS 4
+            int nthreads = n < ALBUM_THREADS ? n : ALBUM_THREADS;
+            sqt_thread_t workers[ALBUM_THREADS];
+            for (int ti = 0; ti < nthreads; ti++)
+                sqt_thread_create(&workers[ti], sqt_album_pool_worker, &pool);
+            for (int ti = 0; ti < nthreads; ti++)
+                sqt_thread_join(workers[ti]);
+#undef ALBUM_THREADS
+
+            sqt_mutex_destroy(&pool.mu);
+            if (album_cover[0]) remove(album_cover);
             sqt_mutex_lock(&s->lock);
-            snprintf(s->status, sizeof(s->status), "error: could not fetch album tracks");
+            snprintf(s->status, sizeof(s->status),
+                     "album done! %d/%d tracks%s",
+                     pool.done, n, pool.failed > 0 ? " (some errors)" : "");
             s->dirty = 1;
             sqt_mutex_unlock(&s->lock);
             free(tracks);
             break;
         }
 
-        /* Create album subfolder */
-        char album_path[512];
-        snprintf(album_path, sizeof(album_path), "%s" SQT_SEP "%s", s->out_dir, ctx->album_name);
-        mkdir_p(album_path);
-
-        /* Fetch cover art ONCE for the whole album */
-        char album_cover[1024] = {0};
-        {
-            Track rich = tracks[0];
-            if (api_get_track_info(tracks[0].id, &rich) != 0 && rich.cover[0]) {
-                snprintf(album_cover, sizeof album_cover,
-                         "%s" SQT_SEP ".sqt_cover_album_%s.jpg", album_path, ctx->album_id);
-                if (http_get_file(rich.cover, album_cover) <= 0) {
-                    SQT_LOG("album cover fetch failed — tracks will be tagged without art");
-                    album_cover[0] = '\0';
-                } else {
-                    SQT_LOG("album cover cached  path='%s'", album_cover);
-                }
-            }
         }
-
-        /* ── parallel download (#1) ──────────────────────────────────────
-         * A simple atomic-counter work-pool: N worker threads each grab
-         * the next track index from a shared counter under a mutex.
-         * Network I/O is the bottleneck, so 4 workers ≈ 4× faster
-         * for a 20-track album (no CPU contention, just overlapped waits).
-         * Progress callbacks are omitted per-worker to avoid garbled status
-         * from 4 concurrent writers; a done-count status is shown instead. */
-        AlbumPool pool;
-        memset(&pool, 0, sizeof pool);
-        pool.tracks = tracks;
-        pool.n      = n;
-        pool.s      = s;
-        snprintf(pool.album_path, sizeof pool.album_path, "%s", album_path);
-        snprintf(pool.cover_path, sizeof pool.cover_path, "%s", album_cover);
-        snprintf(pool.quality,    sizeof pool.quality,    "%s", ctx->quality);
-        sqt_mutex_init(&pool.mu);
-
-        /* Number of worker threads: min(4, n) */
-#define ALBUM_THREADS 4
-        int nthreads = n < ALBUM_THREADS ? n : ALBUM_THREADS;
-        sqt_thread_t workers[ALBUM_THREADS];
-        for (int ti = 0; ti < nthreads; ti++)
-            sqt_thread_create(&workers[ti], sqt_album_pool_worker, &pool);
-        for (int ti = 0; ti < nthreads; ti++)
-            sqt_thread_join(workers[ti]);
-#undef ALBUM_THREADS
-
-        sqt_mutex_destroy(&pool.mu);
-
-        if (album_cover[0]) remove(album_cover);
-        sqt_mutex_lock(&s->lock);
-        snprintf(s->status, sizeof(s->status),
-                 "album done! %d/%d tracks%s",
-                 pool.done, n, pool.failed > 0 ? " (some errors)" : "");
-        s->dirty = 1;
-        sqt_mutex_unlock(&s->lock);
-        free(tracks);
-        break;
     }
-
-    }
-
-    sqt_mutex_lock(&s->lock);
-    s->bg_running = 0;
-    sqt_mutex_unlock(&s->lock);
-    free(ctx);
 #ifndef _WIN32
     return NULL;
 #else
@@ -369,95 +346,90 @@ static SQT_THREAD_FN bg_worker(void *arg) {
 #endif
 }
 
-static void launch_bg(AppState *s, BgCtx *ctx) {
-    if (!ctx) return;  /* defensive check */
+static void push_task(AppState *s, const SQTTask *t) {
     sqt_mutex_lock(&s->lock);
-    if (s->bg_running) { sqt_mutex_unlock(&s->lock); free(ctx); ctx = NULL; return; }
-    s->bg_running = 1;
-    sqt_mutex_unlock(&s->lock);
-    if (sqt_thread_create(&s->bg_thread, bg_worker, ctx) != 0) {
-        /* thread failed to start — reset flag so app isn't permanently locked */
-        sqt_mutex_lock(&s->lock);
-        s->bg_running = 0;
-        snprintf(s->status, sizeof(s->status), "error: failed to start thread");
+    
+    /* if it's a search task, we might want to cancel pending searches? 
+       for now, let's just push it. */
+    
+    if (s->q_count >= SQT_MAX_QUEUE) {
+        snprintf(s->status, sizeof(s->status), "error: queue full");
         s->dirty = 1;
         sqt_mutex_unlock(&s->lock);
-        free(ctx);
-        ctx = NULL;
+        return;
     }
+
+    s->queue[s->q_tail] = *t;
+    s->q_tail = (s->q_tail + 1) % SQT_MAX_QUEUE;
+    s->q_count++;
+
+    if (!s->bg_running) {
+        s->bg_running = 1;
+        if (sqt_thread_create(&s->bg_thread, bg_worker, s) != 0) {
+            s->bg_running = 0;
+            snprintf(s->status, sizeof(s->status), "error: failed to start thread");
+            s->dirty = 1;
+        }
+    }
+    sqt_mutex_unlock(&s->lock);
 }
 
 static void do_search(AppState *s) {
     if (!*s->query) return;
-    BgCtx *ctx = calloc(1, sizeof(BgCtx));
-    if (!ctx) {
-        snprintf(s->status, sizeof(s->status), "error: out of memory");
-        s->dirty = 1;
-        return;
-    }
-    ctx->s = s;
-    ctx->task = BG_SEARCH;
-    snprintf(ctx->query, sizeof(ctx->query), "%s", s->query);
+    SQTTask t;
+    memset(&t, 0, sizeof t);
+    t.type = TASK_SEARCH;
+    snprintf(t.query, sizeof(t.query), "%s", s->query);
     snprintf(s->status, sizeof(s->status), "searching…");
     s->dirty = 1;
-    launch_bg(s, ctx);
+    push_task(s, &t);
 }
 
 static void do_album_search(AppState *s) {
     if (!*s->query) return;
-    BgCtx *ctx = calloc(1, sizeof(BgCtx));
-    if (!ctx) {
-        snprintf(s->status, sizeof(s->status), "error: out of memory");
-        s->dirty = 1;
-        return;
-    }
-    ctx->s = s;
-    ctx->task = BG_ALBUM_SEARCH;
-    snprintf(ctx->query, sizeof(ctx->query), "%s", s->query);
+    SQTTask t;
+    memset(&t, 0, sizeof t);
+    t.type = TASK_ALBUM_SEARCH;
+    snprintf(t.query, sizeof(t.query), "%s", s->query);
     snprintf(s->status, sizeof(s->status), "searching albums…");
     s->dirty = 1;
-    launch_bg(s, ctx);
+    push_task(s, &t);
 }
 
 static void start_album_track_browse(AppState *s, int cursor) {
     if (cursor < 0 || cursor >= s->album_count) return;
-    BgCtx *ctx = calloc(1, sizeof(BgCtx));
-    if (!ctx) return;
-    ctx->s = s;
-    ctx->task = BG_ALBUM_TRACKS;
-    snprintf(ctx->album_id, sizeof(ctx->album_id), "%s", s->albums[cursor].id);
+    SQTTask t;
+    memset(&t, 0, sizeof t);
+    t.type = TASK_ALBUM_TRACKS;
+    snprintf(t.album_id, sizeof(t.album_id), "%s", s->albums[cursor].id);
     snprintf(s->status, sizeof(s->status), "fetching tracks…");
     s->dirty = 1;
-    launch_bg(s, ctx);
+    push_task(s, &t);
 }
 
 static void start_album_download(AppState *s, int cursor) {
     if (cursor < 0 || cursor >= s->album_count) return;
-    BgCtx *ctx = calloc(1, sizeof(BgCtx));
-    if (!ctx) return;
-    ctx->s = s;
-    ctx->task = BG_ALBUM_DOWNLOAD;
-    snprintf(ctx->album_id, sizeof(ctx->album_id), "%s", s->albums[cursor].id);
-    /* sanitise before storing — album title may contain / : * etc. which would
-       wreck the mkdir_p call later (e.g. "AC/DC – Back in Black" → bogus path) */
-    sqt_sanitise(s->albums[cursor].title, ctx->album_name, sizeof(ctx->album_name));
-    snprintf(ctx->quality,  sizeof(ctx->quality),  "%s", QUALITY_LABELS[0]);  /* default: best */
-    snprintf(s->status, sizeof(s->status), "starting album download…");
+    SQTTask t;
+    memset(&t, 0, sizeof t);
+    t.type = TASK_ALBUM_DOWNLOAD;
+    snprintf(t.album_id, sizeof(t.album_id), "%s", s->albums[cursor].id);
+    sqt_sanitise(s->albums[cursor].title, t.album_name, sizeof(t.album_name));
+    snprintf(t.quality,  sizeof(t.quality),  "%s", QUALITY_LABELS[0]);
+    snprintf(s->status, sizeof(s->status), "queued album download");
     s->dirty = 1;
-    launch_bg(s, ctx);
+    push_task(s, &t);
 }
 
 static void start_download(AppState *s, int cursor, int qual_idx) {
     if (cursor < 0 || cursor >= s->track_count) return;
-    BgCtx *ctx = calloc(1, sizeof(BgCtx));
-    if (!ctx) return;
-    ctx->s = s;
-    ctx->task = BG_DOWNLOAD;
-    snprintf(ctx->track_id, sizeof(ctx->track_id), "%s", s->tracks[cursor].id);
-    snprintf(ctx->quality,  sizeof(ctx->quality),  "%s", QUALITY_LABELS[qual_idx]);
-    snprintf(s->status, sizeof(s->status), "starting download…");
+    SQTTask t;
+    memset(&t, 0, sizeof t);
+    t.type = TASK_DOWNLOAD;
+    snprintf(t.track_id, sizeof(t.track_id), "%s", s->tracks[cursor].id);
+    snprintf(t.quality,  sizeof(t.quality),  "%s", QUALITY_LABELS[qual_idx]);
+    snprintf(s->status, sizeof(s->status), "queued download");
     s->dirty = 1;
-    launch_bg(s, ctx);
+    push_task(s, &t);
 }
 
 #ifndef _WIN32
@@ -488,7 +460,7 @@ int main(void) {
     SQT_LOG("AppState size=%zu  mutex initialised", sizeof(s));
 
     // check if configured
-    if (config_load(s.out_dir, sizeof(s.out_dir))) {
+    if (config_load(&s)) {
         /* config found — ensure the directory exists, then go straight to search */
         mkdir_p(s.out_dir);
         snprintf(s.status, sizeof(s.status), "saving to: %.230s", s.out_dir);
@@ -544,6 +516,12 @@ int main(void) {
         /* ── search / results ── */
         case MODE_SEARCH:
         case MODE_RESULTS: {
+            if (key == '?') {
+                s.prev_mode = s.mode;
+                s.mode = MODE_HELP;
+                s.dirty = 1;
+                break;
+            }
             /* TAB: toggle between song search and album search */
             if (key == KEY_TAB) {
                 s.search_type = (s.search_type == SEARCH_SONGS) ? SEARCH_ALBUMS : SEARCH_SONGS;
@@ -559,6 +537,14 @@ int main(void) {
                 if (s.mode == MODE_RESULTS) {
                     if (s.search_type == SEARCH_SONGS &&
                         s.cursor >= 0 && s.cursor < s.track_count) {
+                        if (s.default_quality >= 0) {
+                            int qi     = s.default_quality;
+                            int cursor = s.cursor;
+                            s.dirty = 1;
+                            sqt_mutex_unlock(&s.lock);
+                            start_download(&s, cursor, qi);
+                            continue;
+                        }
                         s.mode = MODE_QUALITY;
                         s.qual_cursor = 0;
                         s.dirty = 1;
@@ -671,6 +657,14 @@ int main(void) {
             }
             if (key >= '1' && key <= '0' + QUALITY_COUNT)
                 s.qual_cursor = key - '1';
+            if (key == 's' || key == 'S') {
+                s.default_quality = s.qual_cursor;
+                config_save(&s);
+                snprintf(s.status, sizeof(s.status), "saved preferred quality: %s", QUALITY_LABELS[s.default_quality]);
+                s.dirty = 1;
+                /* download now too */
+                key = KEY_ENTER;
+            }
             if (key == KEY_ENTER || (key >= '1' && key <= '0' + QUALITY_COUNT)) {
                 int qi     = s.qual_cursor;
                 int cursor = s.cursor;
@@ -705,6 +699,15 @@ int main(void) {
                 if (action == 0) start_album_download(&s, cursor);
                 else             start_album_track_browse(&s, cursor);
                 continue;
+            }
+            break;
+        }
+
+        /* ── help overlay ── */
+        case MODE_HELP: {
+            if (key == KEY_ESC || key == '?' || key == KEY_ENTER || key == 'q') {
+                s.mode = s.prev_mode;
+                s.dirty = 1;
             }
             break;
         }
@@ -747,7 +750,7 @@ int main(void) {
                     if (ok && picked[0]) {
                         snprintf(s.out_dir, sizeof(s.out_dir), "%s", picked);
                         mkdir_p(s.out_dir);
-                        config_save(s.out_dir);
+                        config_save(&s);
                         snprintf(s.status, sizeof(s.status),
                                  "saving to: %.230s", s.out_dir);
                         s.mode  = MODE_SEARCH;
@@ -765,7 +768,7 @@ int main(void) {
                     snprintf(s.out_dir, sizeof(s.out_dir), "%s",
                              s.setup_presets[sel]);
                     mkdir_p(s.out_dir);
-                    config_save(s.out_dir);
+                    config_save(&s);
                     snprintf(s.status, sizeof(s.status),
                              "saving to: %.230s", s.out_dir);
                     s.mode  = MODE_SEARCH;

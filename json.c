@@ -5,7 +5,9 @@
 #include <stdint.h>  /* uintptr_t for bsearch needle (#6) */
 
 /* ── parser state ── */
-typedef struct { const char *p; } P;
+typedef struct { const char *p; int depth; } P;
+
+#define MAX_JSON_DEPTH 32
 
 static void ws(P *p) {
     while (*p->p && isspace((unsigned char)*p->p)) p->p++;
@@ -222,39 +224,45 @@ static JNode *parse_array(P *p) {
 }
 
 static JNode *parse_value(P *p) {
+    if (p->depth >= MAX_JSON_DEPTH) return NULL;
+    p->depth++;
     ws(p);
-    if (!*p->p) return NULL;
-    if (*p->p == '{') return parse_object(p);
-    if (*p->p == '[') return parse_array(p);
-    if (*p->p == '"') {
+    JNode *res = NULL;
+    if (*p->p == '{') res = parse_object(p);
+    else if (*p->p == '[') res = parse_array(p);
+    else if (*p->p == '"') {
         JNode *n = calloc(1, sizeof(JNode));
-        if (!n) return NULL;
-        n->type = J_STR;
-        n->s = parse_str(p);
-        return n;
+        if (n) {
+            n->type = J_STR;
+            n->s = parse_str(p);
+            res = n;
+        }
     }
-    if (strncmp(p->p, "true",  4) == 0) { p->p += 4; JNode *n = calloc(1, sizeof(JNode)); if (!n) return NULL; n->type = J_BOOL; n->b = 1; return n; }
-    if (strncmp(p->p, "false", 5) == 0) { p->p += 5; JNode *n = calloc(1, sizeof(JNode)); if (!n) return NULL; n->type = J_BOOL; n->b = 0; return n; }
-    if (strncmp(p->p, "null",  4) == 0) { p->p += 4; JNode *n = calloc(1, sizeof(JNode)); if (!n) return NULL; n->type = J_NULL; return n; }
-    if (*p->p == '-' || isdigit((unsigned char)*p->p)) {
+    else if (strncmp(p->p, "true",  4) == 0) { p->p += 4; JNode *n = calloc(1, sizeof(JNode)); if (n) { n->type = J_BOOL; n->b = 1; res = n; } }
+    else if (strncmp(p->p, "false", 5) == 0) { p->p += 5; JNode *n = calloc(1, sizeof(JNode)); if (n) { n->type = J_BOOL; n->b = 0; res = n; } }
+    else if (strncmp(p->p, "null",  4) == 0) { p->p += 4; JNode *n = calloc(1, sizeof(JNode)); if (n) { n->type = J_NULL; res = n; } }
+    else if (*p->p == '-' || isdigit((unsigned char)*p->p)) {
         JNode *n = calloc(1, sizeof(JNode));
-        if (!n) return NULL;
-        n->type = J_NUM;
-        char *end;
-        n->n = strtod(p->p, &end);
-        p->p = end;
-        return n;
+        if (n) {
+            n->type = J_NUM;
+            char *end;
+            n->n = strtod(p->p, &end);
+            p->p = end;
+            res = n;
+        }
+    } else if (*p->p) {
+        /* Unknown token: advance one character so callers don't infinite-loop */
+        p->p++;
     }
-    /* Unknown token: advance one character so callers don't infinite-loop */
-    if (*p->p) p->p++;
-    return NULL;
+    p->depth--;
+    return res;
 }
 
 /* ── public API ── */
 
 JNode *json_parse(const char *src) {
     if (!src) return NULL;
-    P p = {src};
+    P p = {src, 0};
     return parse_value(&p);
 }
 

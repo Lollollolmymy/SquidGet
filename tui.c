@@ -23,6 +23,7 @@ static DWORD g_orig_in, g_orig_out;
 #define A_RST   "\033[0m"
 #define A_BOLD  "\033[1m"
 #define A_DIM   "\033[2m"
+#define A_ITAL  "\033[3m"
 #define A_HIDE  "\033[?25l"
 #define A_SHOW  "\033[?25h"
 #define A_CLR   "\033[2J\033[H"
@@ -30,32 +31,61 @@ static DWORD g_orig_in, g_orig_out;
 #define A_ALT_OFF "\033[?1049l"
 #define A_EOL   "\033[K"
 
+/* Color palette (256-color) */
+#define C_LAVENDER "\033[38;5;147m"
+#define C_SKY      "\033[38;5;117m"
+#define C_BLUE     "\033[38;5;75m"
+#define C_ORANGE   "\033[38;5;209m"
+#define C_GOLD     "\033[38;5;221m"
+#define C_PINK     "\033[38;5;211m"
+#define C_GREY_L   "\033[38;5;250m"
+#define C_GREY_D   "\033[38;5;240m"
+#define C_BG_SEL   "\033[48;5;236m"
+#define C_ERR      "\033[38;5;203m"
+#define C_OK       "\033[38;5;114m"
+
 /* Color schemes */
-typedef struct { const char *border, *logo, *hdr, *sel_num, *keyname, *prompt, *qsel, *cursor, *mode; } ColorScheme;
+typedef struct { 
+    const char *border, *logo, *hdr, *sel_num, *keyname, *prompt, *qsel, *cursor, *mode, *text_hi, *text_dim; 
+} ColorScheme;
 
 static const ColorScheme SONG_SCHEME = {
-    .border = "\033[38;5;61m",
-    .logo = "\033[38;5;111m",
-    .hdr = "\033[38;5;67m",
-    .sel_num = "\033[38;5;111m",
-    .keyname = "\033[38;5;111m",
-    .prompt = "\033[38;5;111m",
-    .qsel = "\033[38;5;111m",
-    .cursor = "\033[38;5;226m",
-    .mode = "\033[38;5;67m"
+    .border   = C_LAVENDER,
+    .logo     = C_SKY,
+    .hdr      = C_BLUE,
+    .sel_num  = C_SKY,
+    .keyname  = C_SKY,
+    .prompt   = C_SKY,
+    .qsel     = C_SKY,
+    .cursor   = "\033[38;5;226m",
+    .mode     = C_BLUE,
+    .text_hi  = "\033[38;5;255m",
+    .text_dim = "\033[38;5;244m"
 };
 
 static const ColorScheme ALBUM_SCHEME = {
-    .border = "\033[38;5;130m",
-    .logo = "\033[38;5;214m",
-    .hdr = "\033[38;5;172m",
-    .sel_num = "\033[38;5;214m",
-    .keyname = "\033[38;5;214m",
-    .prompt = "\033[38;5;214m",
-    .qsel = "\033[38;5;214m",
-    .cursor = "\033[38;5;208m",
-    .mode = "\033[38;5;172m"
+    .border   = C_ORANGE,
+    .logo     = C_GOLD,
+    .hdr      = "\033[38;5;173m",
+    .sel_num  = C_GOLD,
+    .keyname  = C_GOLD,
+    .prompt   = C_GOLD,
+    .qsel     = C_GOLD,
+    .cursor   = "\033[38;5;214m",
+    .mode     = "\033[38;5;173m",
+    .text_hi  = "\033[38;5;255m",
+    .text_dim = "\033[38;5;244m"
 };
+
+/* Box Drawing (Rounded) */
+#define B_TL "\xe2\x95\xad" /* ╭ */
+#define B_TR "\xe2\x95\xae" /* ╮ */
+#define B_BL "\xe2\x95\xb0" /* ╰ */
+#define B_BR "\xe2\x95\xaf" /* ╯ */
+#define B_HL "\xe2\x94\x80" /* ─ */
+#define B_VL "\xe2\x94\x82" /* │ */
+#define B_ML "\xe2\x94\x9c" /* ├ */
+#define B_MR "\xe2\x94\xa4" /* ┤ */
 
 static const char *SPIN[] = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","⠇","⠏"};
 #define NSPIN 10
@@ -284,7 +314,7 @@ static void list_col_widths(int W, int *tw, int *aw) {
 
 /* Render functions */
 static void render_top_border(AppState *s, int W) {
-    const char *lbl = " squidget ";
+    const char *lbl = " SquidGet ";
     int lblw = (int)strlen(lbl);
     int ld = (W - 2 - lblw) / 2;
     int rd = W - 2 - lblw - ld;
@@ -293,15 +323,15 @@ static void render_top_border(AppState *s, int W) {
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x95\xad");
-    rb_rep("\xe2\x94\x80", ld);
+    rb_s(B_TL);
+    rb_rep(B_HL, ld);
     rb_s(A_BOLD);
     rb_s(c->logo);
     rb_s(lbl);
     rb_s(A_RST);
     rb_s(c->border);
-    rb_rep("\xe2\x94\x80", rd);
-    rb_s("\xe2\x95\xaf");
+    rb_rep(B_HL, rd);
+    rb_s(B_TR);
     rb_s(A_RST);
     fb_put(s, 0, rb_done());
 }
@@ -310,16 +340,17 @@ static void render_search_bar(AppState *s, int W) {
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST " ");
+    rb_s(B_VL A_RST " ");
     int used = 2;
     
     const char *badge = 
         s->mode == MODE_SEARCH  ? (s->search_type == SEARCH_ALBUMS ? " ALBUM SEARCH " : " SONG SEARCH ") :
         s->mode == MODE_RESULTS ? (s->search_type == SEARCH_ALBUMS ? " ALBUM RESULTS " : " SONG RESULTS ") :
         s->mode == MODE_SETUP   ? " SETUP " :
+        s->mode == MODE_HELP    ? " HELP " :
         s->mode == MODE_ALBUM_ACTION ? " ALBUM " : " QUALITY ";
     
-    rb_s("\033[48;5;237m");
+    rb_s("\033[48;5;236m");
     rb_s(c->mode);
     rb_s(A_BOLD);
     rb_s(badge);
@@ -331,7 +362,7 @@ static void render_search_bar(AppState *s, int W) {
     used += 2;
     
     if (s->bg_running) {
-        rb_s("\033[38;5;179m");
+        rb_s(C_GOLD);
         rb_s(SPIN[s->spin_frame % NSPIN]);
         rb_s(A_RST " ");
         used += 2;
@@ -341,7 +372,7 @@ static void render_search_bar(AppState *s, int W) {
     if (qspace < 0) qspace = 0;
     char qbuf[512];
     trunc_to(s->query, qbuf, sizeof(qbuf), qspace);
-    rb_s("\033[38;5;253m");
+    rb_s(c->text_hi);
     rb_s(A_BOLD);
     rb_s(qbuf);
     rb_s(A_RST);
@@ -349,13 +380,13 @@ static void render_search_bar(AppState *s, int W) {
     
     if ((s->mode == MODE_SEARCH || s->mode == MODE_RESULTS) && used < W - 2) {
         rb_s(c->prompt);
-        rb_s("│" A_RST);
+        rb_s(A_BOLD "\xe2\x96\x8f" A_RST); /* cursor block */
         used++;
     }
     
     rb_pad(W - 1 - used);
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     fb_put(s, 1, rb_done());
 }
 
@@ -363,7 +394,7 @@ static void render_header(AppState *s, int inner, int tw, int aw) {
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x94\x9c" A_RST);
+    rb_s(B_ML A_RST);
     
     char hdr[512];
     if (s->search_type == SEARCH_ALBUMS)
@@ -374,12 +405,12 @@ static void render_header(AppState *s, int inner, int tw, int aw) {
     char hdr_t[512];
     trunc_to(hdr, hdr_t, sizeof(hdr_t), inner);
     rb_s(c->hdr);
-    rb_s(A_DIM);
+    rb_s(A_ITAL A_BOLD);
     rb_s(hdr_t);
     rb_pad(inner - utf8_width(hdr_t));
     rb_s(A_RST);
     rb_s(c->border);
-    rb_s("\xe2\x94\xa4" A_RST);
+    rb_s(B_MR A_RST);
     fb_put(s, 2, rb_done());
 }
 
@@ -387,81 +418,108 @@ static void render_list_row(AppState *s, int r, int idx, int inner, int tw, int 
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     
-    if (is_sel) rb_s("\033[48;5;237m");
+    int total = (s->search_type == SEARCH_ALBUMS) ? s->album_count : s->track_count;
+    int nlist = s->rows - 5;
+    if (nlist < 1) nlist = 1;
     
-    char nstr[8];
-    snprintf(nstr, sizeof(nstr), "%3d", (idx + 1) % 1000);
-    rb_s(" ");
-    rb_s(is_sel ? c->sel_num : "\033[38;5;238m");
-    if (is_sel) rb_s(A_BOLD);
-    rb_s(nstr);
-    rb_s(A_RST);
-    if (is_sel) rb_s("\033[48;5;237m");
-    rb_s(" ");
+    int content_w = inner - 1;
+    if (is_sel) rb_s(C_BG_SEL);
     
-    if (is_sel) {
-        rb_s(c->cursor);
-        rb_s(A_BOLD);
-        rb_s(IND " ");
+    if (idx < total) {
+        char nstr[8];
+        snprintf(nstr, sizeof(nstr), "%3d", (idx + 1) % 1000);
+        rb_s(" ");
+        rb_s(is_sel ? c->sel_num : "\033[38;5;240m");
+        if (is_sel) rb_s(A_BOLD);
+        rb_s(nstr);
         rb_s(A_RST);
-        rb_s("\033[48;5;237m");
-    } else {
-        rb_s("  ");
+        if (is_sel) rb_s(C_BG_SEL);
+        rb_s(" ");
+        
+        if (is_sel) {
+            rb_s(c->cursor);
+            rb_s(A_BOLD);
+            rb_s(IND " ");
+            rb_s(A_RST);
+            rb_s(C_BG_SEL);
+        } else {
+            rb_s("  ");
+        }
+        
+        if (s->search_type == SEARCH_ALBUMS) {
+            char atitl[SQT_TITLE_SZ];
+            trunc_to(s->albums[idx].title, atitl, sizeof(atitl), tw);
+            if (is_sel) { rb_s(c->text_hi); rb_s(A_BOLD); } else { rb_s(C_GREY_L); }
+            rb_s(atitl);
+            rb_pad(tw - utf8_width(atitl) + 1);
+            
+            char artst[SQT_TITLE_SZ];
+            trunc_to(s->albums[idx].artist, artst, sizeof(artst), aw);
+            rb_s(is_sel ? c->text_hi : c->text_dim);
+            rb_s(artst);
+            rb_pad(aw - utf8_width(artst) + 1);
+            
+            char trkcnt[8];
+            snprintf(trkcnt, sizeof(trkcnt), "%3d", s->albums[idx].num_tracks % 1000);
+            rb_s(is_sel ? c->text_hi : C_GREY_D);
+            rb_s(trkcnt);
+        } else {
+            char titl[SQT_TITLE_SZ];
+            trunc_to(s->tracks[idx].title, titl, sizeof(titl), tw);
+            if (is_sel) { rb_s(c->text_hi); rb_s(A_BOLD); } else { rb_s(C_GREY_L); }
+            rb_s(titl);
+            rb_pad(tw - utf8_width(titl) + 1);
+            
+            char artst[SQT_TITLE_SZ];
+            trunc_to(s->tracks[idx].artist, artst, sizeof(artst), aw);
+            rb_s(is_sel ? c->text_hi : c->text_dim);
+            rb_s(artst);
+            rb_pad(aw - utf8_width(artst) + 1);
+            
+            char dur[12];
+            fmt_dur(s->tracks[idx].duration, dur, sizeof(dur));
+            rb_s(is_sel ? c->text_hi : C_GREY_D);
+            rb_s(dur);
+        }
     }
     
-    if (s->search_type == SEARCH_ALBUMS && idx < s->album_count) {
-        char atitl[SQT_TITLE_SZ];
-        trunc_to(s->albums[idx].title, atitl, sizeof(atitl), tw);
-        rb_s(is_sel ? "\033[38;5;255m" A_BOLD : "\033[38;5;253m");
-        rb_s(atitl);
-        rb_pad(tw - utf8_width(atitl) + 1);
-        
-        char artst[SQT_TITLE_SZ];
-        trunc_to(s->albums[idx].artist, artst, sizeof(artst), aw);
-        rb_s(is_sel ? "\033[38;5;255m" : "\033[38;5;246m");
-        rb_s(artst);
-        rb_pad(aw - utf8_width(artst) + 1);
-        
-        char trkcnt[8];
-        snprintf(trkcnt, sizeof(trkcnt), "%3d", s->albums[idx].num_tracks % 1000);
-        rb_s(is_sel ? "\033[38;5;255m" : "\033[38;5;242m");
-        rb_s(trkcnt);
-    } else if (s->search_type == SEARCH_SONGS && idx < s->track_count) {
-        char titl[SQT_TITLE_SZ];
-        trunc_to(s->tracks[idx].title, titl, sizeof(titl), tw);
-        rb_s(is_sel ? "\033[38;5;255m" A_BOLD : "\033[38;5;253m");
-        rb_s(titl);
-        rb_pad(tw - utf8_width(titl) + 1);
-        
-        char artst[SQT_TITLE_SZ];
-        trunc_to(s->tracks[idx].artist, artst, sizeof(artst), aw);
-        rb_s(is_sel ? "\033[38;5;255m" : "\033[38;5;246m");
-        rb_s(artst);
-        rb_pad(aw - utf8_width(artst) + 1);
-        
-        char dur[12];
-        fmt_dur(s->tracks[idx].duration, dur, sizeof(dur));
-        rb_s(is_sel ? "\033[38;5;255m" : "\033[38;5;242m");
-        rb_s(dur);
-    } else {
-        rb_pad(inner);
-    }
-    
+    rb_pad(content_w - (utf8_width(rb_done()) - 1));
     rb_s(A_RST);
+    
+    /* Scrollbar column */
+    if (total > nlist) {
+        int thumb_h = (nlist * nlist) / total;
+        if (thumb_h < 1) thumb_h = 1;
+        int thumb_y = (s->scroll * nlist) / total;
+        if (thumb_y + thumb_h > nlist) thumb_y = nlist - thumb_h;
+        
+        if (r >= thumb_y && r < thumb_y + thumb_h) {
+            rb_s(c->border);
+            rb_s("\xe2\x96\x88"); /* Full block thumb */
+        } else {
+            rb_s("\033[38;5;236m");
+            rb_s(B_VL); /* Dim track */
+        }
+        rb_s(A_RST);
+    } else {
+        rb_s(" ");
+    }
+    
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     fb_put(s, list_top + r, rb_done());
 }
+
 
 static void render_bottom_border(AppState *s, int inner) {
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x95\xb0");
-    rb_rep("\xe2\x94\x80", inner);
-    rb_s("\xe2\x95\xaf");
+    rb_s(B_BL);
+    rb_rep(B_HL, inner);
+    rb_s(B_BR);
     rb_s(A_RST);
     fb_put(s, s->rows - 2, rb_done());
 }
@@ -477,19 +535,20 @@ static void render_status_bar(AppState *s, int W) {
     if (s->mode == MODE_SEARCH || s->mode == MODE_RESULTS) {
         kb[nkb++] = (KB){"↑↓", "nav"};
         kb[nkb++] = (KB){"enter", "select"};
+        kb[nkb++] = (KB){"?", "help"};
         kb[nkb++] = (KB){"^U", "clear"};
         kb[nkb++] = (KB){"tab", s->search_type == SEARCH_ALBUMS ? "songs" : "albums"};
-        kb[nkb++] = (KB){"^C", "quit"};
     } else if (s->mode == MODE_QUALITY) {
         kb[nkb++] = (KB){"↑↓", "move"};
         kb[nkb++] = (KB){"1-5", "pick"};
-        kb[nkb++] = (KB){"enter", "dl"};
+        kb[nkb++] = (KB){"s", "save"};
         kb[nkb++] = (KB){"esc", "cancel"};
     } else if (s->mode == MODE_ALBUM_ACTION) {
         kb[nkb++] = (KB){"↑↓", "move"};
         kb[nkb++] = (KB){"1-2", "pick"};
         kb[nkb++] = (KB){"enter", "confirm"};
-        kb[nkb++] = (KB){"esc", "cancel"};
+    } else if (s->mode == MODE_HELP) {
+        kb[nkb++] = (KB){"esc/q/?", "close"};
     } else if (s->mode == MODE_SETUP) {
         kb[nkb++] = (KB){"↑↓", "move"};
         kb[nkb++] = (KB){"1-4", "shortcut"};
@@ -512,7 +571,7 @@ static void render_status_bar(AppState *s, int W) {
     }
     
     if (*s->status) {
-        const char *sc = strncmp(s->status, "error", 5) == 0 ? "\033[38;5;167m" : "\033[38;5;179m";
+        const char *sc = strncmp(s->status, "error", 5) == 0 ? C_ERR : C_GOLD;
         int avail = W - 1 - kw;
         if (avail >= 4) {
             char st[256];
@@ -530,12 +589,63 @@ static void render_status_bar(AppState *s, int W) {
     fb_put(s, s->rows - 1, rb_done());
 }
 
+/* Modal-style help rendering */
+static void render_help_row(AppState *s, int r, int inner, int list_top) {
+    const ColorScheme *c = TC(s);
+    rb_reset();
+    rb_s(c->border);
+    rb_s(B_VL A_RST);
+    
+    typedef struct { const char *k, *d; } HelpItem;
+    static const HelpItem items[] = {
+        {"UP/DOWN",   "Navigate results"},
+        {"PGUP/PGDN", "Scroll page"},
+        {"ENTER",     "Download / Select"},
+        {"TAB",       "Toggle Song/Album search"},
+        {"s",         "Save preferred quality"},
+        {"?",         "Toggle this help"},
+        {"^U",        "Clear search query"},
+        {"ESC",       "Back / Cancel"},
+        {"^C",        "Quit application"}
+    };
+    int nitems = sizeof(items) / sizeof(items[0]);
+    
+    if (r == 0) {
+        const char *hd = "  SquidGet Keybindings";
+        rb_s(c->logo);
+        rb_s(A_BOLD);
+        rb_s(hd);
+        rb_pad(inner - utf8_width(hd));
+        rb_s(A_RST);
+    } else if (r >= 2 && r - 2 < nitems) {
+        const HelpItem *it = &items[r - 2];
+        rb_s("    ");
+        rb_s(c->keyname);
+        rb_s(A_BOLD);
+        char kbuf[32];
+        snprintf(kbuf, sizeof(kbuf), "%-10s", it->k);
+        rb_s(kbuf);
+        rb_s(A_RST);
+        rb_s("  ");
+        rb_s(c->text_hi);
+        rb_s(it->d);
+        rb_pad(inner - 4 - 10 - 2 - utf8_width(it->d));
+        rb_s(A_RST);
+    } else {
+        rb_pad(inner);
+    }
+    
+    rb_s(c->border);
+    rb_s(B_VL A_RST);
+    fb_put(s, list_top + r, rb_done());
+}
+
 /* Setup mode rendering */
 static void render_setup_row(AppState *s, int r, int inner, int list_top) {
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     
     if (r == 0) {
         const char *hd = "  \xe2\x99\xaa  Where should squidget save music?";
@@ -568,7 +678,7 @@ static void render_setup_row(AppState *s, int r, int inner, int list_top) {
             } else if (is_browse) {
                 rb_s(c->keyname);
             } else {
-                rb_s("\033[38;5;253m");
+                rb_s(c->text_dim);
             }
             rb_s(line);
             rb_pad(inner - utf8_width(line));
@@ -579,7 +689,7 @@ static void render_setup_row(AppState *s, int r, int inner, int list_top) {
     }
     
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     fb_put(s, list_top + r, rb_done());
 }
 
@@ -588,7 +698,7 @@ static void render_quality_row(AppState *s, int r, int inner, int list_top) {
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     
     if (r == 0) {
         char titl[256];
@@ -610,7 +720,7 @@ static void render_quality_row(AppState *s, int r, int inner, int list_top) {
             rb_s(c->qsel);
             rb_s(A_BOLD);
         } else {
-            rb_s("\033[38;5;238m");
+            rb_s(c->text_dim);
         }
         rb_s(ql);
         rb_pad(inner - utf8_width(ql));
@@ -626,7 +736,7 @@ static void render_quality_row(AppState *s, int r, int inner, int list_top) {
     }
     
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     fb_put(s, list_top + r, rb_done());
 }
 
@@ -635,7 +745,7 @@ static void render_album_action_row(AppState *s, int r, int inner, int list_top)
     const ColorScheme *c = TC(s);
     rb_reset();
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     
     if (r == 0) {
         char atitl[256];
@@ -666,7 +776,7 @@ static void render_album_action_row(AppState *s, int r, int inner, int list_top)
             rb_s(c->qsel);
             rb_s(A_BOLD);
         } else {
-            rb_s("\033[38;5;238m");
+            rb_s(c->text_dim);
         }
         rb_s(ql);
         rb_pad(inner - utf8_width(ql));
@@ -682,7 +792,7 @@ static void render_album_action_row(AppState *s, int r, int inner, int list_top)
     }
     
     rb_s(c->border);
-    rb_s("\xe2\x94\x82" A_RST);
+    rb_s(B_VL A_RST);
     fb_put(s, list_top + r, rb_done());
 }
 
@@ -721,6 +831,8 @@ void tui_render(AppState *s) {
             render_quality_row(s, r, inner, list_top);
         } else if (s->mode == MODE_ALBUM_ACTION) {
             render_album_action_row(s, r, inner, list_top);
+        } else if (s->mode == MODE_HELP) {
+            render_help_row(s, r, inner, list_top);
         } else {
             render_list_row(s, r, idx, inner, tw, aw, is_sel, list_top);
         }

@@ -3,6 +3,7 @@
 #  define _DEFAULT_SOURCE   /* exposes usleep, strdup, etc. on glibc */
 #  include <time.h>         /* nanosleep */
 #endif
+#include <stdint.h>
 
 #ifdef _WIN32
 #  include <windows.h>
@@ -50,3 +51,13 @@ static inline void sqt_sleep_ms_impl(unsigned ms) {
 }
 #  define sqt_sleep_ms(ms)              sqt_sleep_ms_impl(ms)
 #endif
+
+static inline uint64_t sqt_time_ms(void) {
+#ifdef _WIN32
+    return GetTickCount64();
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000 + (uint64_t)ts.tv_nsec / 1000000;
+#endif
+}

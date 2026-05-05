@@ -62,6 +62,7 @@ typedef struct Track {
     int   explicit_;
     float replay_gain;
     char  quality[SQT_QUAL_SZ];
+    char *lyrics;  /* dynamically allocated LRC string or NULL */
 } Track;
 
 /* ── Album ── */
@@ -79,6 +80,7 @@ typedef enum {
     MODE_QUALITY,      /* picking download quality          */
     MODE_SETUP,        /* first-run save-location UI        */
     MODE_ALBUM_ACTION, /* download album or browse songs    */
+    MODE_HELP,         /* keybinding help overlay           */
 } Mode;
 
 /* frame-buffer row
@@ -92,6 +94,25 @@ typedef struct {
     int      dirty;
 } FBRow;
 
+typedef enum {
+    TASK_SEARCH = 0,
+    TASK_DOWNLOAD,
+    TASK_ALBUM_SEARCH,
+    TASK_ALBUM_TRACKS,
+    TASK_ALBUM_DOWNLOAD
+} TaskType;
+
+typedef struct {
+    TaskType type;
+    char     query[512];
+    char     track_id[SQT_ID_SZ];
+    char     album_id[SQT_ID_SZ];
+    char     album_name[SQT_TITLE_SZ];
+    char     quality[SQT_QUAL_SZ];
+} SQTTask;
+
+#define SQT_MAX_QUEUE 64
+
 /* ── application state ── */
 typedef struct {
     /* terminal */
@@ -99,6 +120,7 @@ typedef struct {
 
     /* mode */
     Mode mode;
+    Mode prev_mode;
 
     /* search */
     char query[512];
@@ -143,6 +165,13 @@ typedef struct {
     /* status bar */
     char status[SQT_STATUS_SZ];
 
+    /* configuration */
+    int default_quality; /* -1 = unset, 0..4 = index in QUALITY_LABELS */
+
+    /* background queue */
+    SQTTask      queue[SQT_MAX_QUEUE];
+    int          q_head, q_tail, q_count;
+
     /* background thread */
     sqt_mutex_t  lock;
     sqt_thread_t bg_thread;
@@ -152,8 +181,8 @@ typedef struct {
 } AppState;
 
 /* ── config.c ── */
-int  config_load(char *out_dir, size_t sz);
-void config_save(const char *out_dir);
+int  config_load(AppState *s);
+void config_save(AppState *s);
 
 /* ── platform.c ── */
 /* Opens the OS-native folder picker; returns 1 + fills buf on success. */
@@ -164,7 +193,8 @@ int  gui_pick_folder(char *buf, size_t bufsz);
 void  http_init(void);
 void  http_cleanup(void);
 char *http_get(const char *url);
-long  http_get_file(const char *url, const char *path);
+long  http_get_file(const char *url, const char *path,
+                    void (*progress_cb)(size_t received, size_t total, void *ud), void *ud);
 /* POST request with JSON body — returns allocated response body or NULL */
 char *http_post(const char *url, const char *json_body);
 int   api_search_tracks(const char *query, Track *out, int max);
@@ -172,6 +202,7 @@ int   api_search_albums(const char *query, Album *out, int max);
 int   api_get_album_tracks(const char *album_id, Track *out, int max);
 /* fetches /info/ for a single track — fills cover, year, ISRC, etc. */
 int   api_get_track_info(const char *track_id, Track *out);
+char *api_get_lyrics(const char *isrc);
 /* Qobuz fallback: resolves ISRC → direct Akamai FLAC URL via zarz.moe.
    Returns 1 + fills out_url (size sz) on success; 0 on failure. */
 int   api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz);

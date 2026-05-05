@@ -57,36 +57,38 @@ static void ensure_config_dir(void) {
 }
 
 // load config from disk
-int config_load(char *out_dir, size_t sz) {
+int config_load(AppState *s) {
     char path[600];
     config_file(path, sizeof(path));
+
+    s->default_quality = -1; /* default to unset */
 
     FILE *f = fopen(path, "r");
     if (!f) return 0;
 
-    char line[600];  /* handle long paths */
+    char line[600];
+    int loaded = 0;
     while (fgets(line, sizeof(line), f)) {
-        if (strncmp(line, "out_dir=", 8) != 0) continue;
-
-        char *val = line + 8;
-        size_t len = strlen(val);
-        /* strip trailing newlines/CR */
-        while (len > 0 && (val[len-1] == '\n' || val[len-1] == '\r'))
-            val[--len] = '\0';
-
-        if (len == 0) continue;   /* ignore blank value */
-
-        snprintf(out_dir, sz, "%s", val);
-        fclose(f);
-        return 1;
+        if (strncmp(line, "out_dir=", 8) == 0) {
+            char *val = line + 8;
+            size_t len = strlen(val);
+            while (len > 0 && (val[len-1] == '\n' || val[len-1] == '\r'))
+                val[--len] = '\0';
+            if (len > 0) {
+                snprintf(s->out_dir, sizeof(s->out_dir), "%s", val);
+                loaded = 1;
+            }
+        } else if (strncmp(line, "quality=", 8) == 0) {
+            s->default_quality = atoi(line + 8);
+        }
     }
 
     fclose(f);
-    return 0;
+    return loaded;
 }
 
 // save config to disk (atomic: write to .tmp then rename)
-void config_save(const char *out_dir) {
+void config_save(AppState *s) {
     ensure_config_dir();
 
     char path[600];
@@ -97,12 +99,14 @@ void config_save(const char *out_dir) {
 
     FILE *f = fopen(tmp_path, "w");
     if (!f) return;
-    fprintf(f, "out_dir=%s\n", out_dir);
+    fprintf(f, "out_dir=%s\n", s->out_dir);
+    if (s->default_quality >= 0) {
+        fprintf(f, "quality=%d\n", s->default_quality);
+    }
     fclose(f);
 
-    /* Atomic replace — if rename fails, at least the live config is intact */
+    /* Atomic replace */
 #ifdef _WIN32
-    /* Windows rename() fails if dest exists */
     remove(path);
 #endif
     rename(tmp_path, path);

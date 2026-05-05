@@ -211,6 +211,7 @@ static void build_vorbis_comment(Bb *b, const Track *t) {
                            VC("ALBUMARTIST",t->artist); }
     if (t->album[0])       VC("ALBUM",      t->album);
     if (t->year[0])        VC("DATE",       t->year);
+    if (t->lyrics && t->lyrics[0]) VC("LYRICS", t->lyrics);
     if (t->track_num > 0)  VCI("TRACKNUMBER", t->track_num);
     if (t->disc_num  > 0)  VCI("DISCNUMBER",  t->disc_num);
     if (t->isrc[0])        VC("ISRC",       t->isrc);
@@ -480,8 +481,10 @@ static void build_ilst(Bb *b, const Track *t, const uint8_t *cover, size_t cover
     bb_text_atom(b, (const char*)alb_atom, t->album);
     bb_text_atom(b, (const char*)day_atom, t->year);
     bb_text_atom(b, "cprt", t->copyright);
-    
+    if (t->lyrics && t->lyrics[0]) bb_text_atom(b, "\xa9lyr", t->lyrics);
+
     if (t->track_num > 0) bb_pair_atom(b, "trkn", (uint16_t)t->track_num);
+
     if (t->disc_num  > 0) bb_pair_atom(b, "disk", (uint16_t)t->disc_num);
     bb_free_atom(b, "ISRC", t->isrc);
     
@@ -527,57 +530,67 @@ static void build_meta_content(Bb *out, const Bb *ilst_data) {
 }
 
 static int m4a_tag(const char *path, const Track *t, const char *cover_path) {
-    SQT_LOG("m4a_tag START  path='%s'", path);
+    SQT_LOG("m4a_tag (streaming) START  path='%s'", path);
 
-    size_t fsz;
-    uint8_t *file = file_read(path, &fsz);
-    if (!file) { SQT_LOG("m4a_tag: file_read NULL"); return -1; }
+    FILE *in = fopen(path, "rb");
+    if (!in) { SQT_LOG("m4a_tag: cannot open input"); return -1; }
 
-    size_t moov_start = 0, moov_coff = 0, moov_end_abs = 0;
-    int found_moov = 0;
-    {
-        size_t cur = 0;
-        while (cur < fsz) {
-            char ty[4]; size_t co, cs;
-            size_t next = box_next(file, fsz, cur, ty, &co, &cs);
-            if (!next) break;
-            if (memcmp(ty, "moov", 4) == 0) {
-                moov_start = cur; moov_coff = co; moov_end_abs = next;
-                found_moov = 1; break;
-            }
-            cur = next;
+    fseek(in, 0, SEEK_END);
+    size_t fsz = (size_t)ftell(in);
+    rewind(in);
+
+    size_t moov_start = 0, moov_len = 0, moov_coff = 0;
+    size_t mdat_start = 0, mdat_len = 0;
+    uint8_t *ftyp_data = NULL; size_t ftyp_len = 0;
+    uint8_t *moov_data = NULL;
+
+    size_t cur = 0;
+    while (cur < fsz) {
+        uint8_t h[8];
+        if (fseek(in, (long)cur, SEEK_SET) != 0 || fread(h, 1, 8, in) != 8) break;
+        uint32_t sz = rd32be(h);
+        char ty[4]; memcpy(ty, h + 4, 4);
+
+        if (memcmp(ty, "ftyp", 4) == 0) {
+            ftyp_len = sz;
+            ftyp_data = malloc(sz);
+            fseek(in, (long)cur, SEEK_SET);
+            if (fread(ftyp_data, 1, sz, in) != sz) { free(ftyp_data); ftyp_data = NULL; }
+        } else if (memcmp(ty, "moov", 4) == 0) {
+            moov_start = cur;
+            moov_len = sz;
+            moov_data = malloc(sz);
+            fseek(in, (long)cur, SEEK_SET);
+            if (fread(moov_data, 1, sz, in) != sz) { free(moov_data); moov_data = NULL; }
+            /* find coff (start of boxes inside moov) */
+            size_t co, cs;
+            box_next(moov_data, moov_len, 0, NULL, &co, &cs);
+            moov_coff = co;
+        } else if (memcmp(ty, "mdat", 4) == 0) {
+            mdat_start = cur;
+            mdat_len = sz;
         }
+
+        if (sz == 0) break;
+        cur += sz;
     }
-    
-    if (!found_moov) { free(file); return -1; }
 
-    int moov_before_mdat = 0;
-    {
-        size_t cur = 0;
-        while (cur < fsz) {
-            char ty[4]; size_t co, cs;
-            size_t next = box_next(file, fsz, cur, ty, &co, &cs);
-            if (!next) break;
-            if (memcmp(ty, "mdat", 4) == 0) {
-                moov_before_mdat = (moov_start < cur);
-                break;
-            }
-            cur = next;
-        }
+    if (!moov_data) {
+        if (ftyp_data) free(ftyp_data);
+        fclose(in);
+        SQT_LOG("m4a_tag: moov not found");
+        return -1;
     }
 
     uint8_t *cover = NULL; size_t cover_sz = 0;
-    if (cover_path && cover_path[0]) {
-        cover = file_read(cover_path, &cover_sz);
-    }
+    if (cover_path && cover_path[0]) cover = file_read(cover_path, &cover_sz);
 
     Bb ilst = {0};
     build_ilst(&ilst, t, cover, cover_sz);
     free(cover);
 
-    if (!ilst.d || ilst.len == 0 || ilst.len > 100000000UL) {
-        bb_free(&ilst);
-        free(file);
+    if (ilst.len == 0 || ilst.len > 100000000UL) {
+        bb_free(&ilst); free(ftyp_data); free(moov_data); fclose(in);
         return -1;
     }
 
@@ -587,15 +600,15 @@ static int m4a_tag(const char *path, const Track *t, const char *cover_path) {
 
     Bb moov_body = {0};
     {
-        size_t cur = moov_coff, end = moov_end_abs;
-        while (cur < end) {
+        size_t cur_m = moov_coff, end_m = moov_len;
+        while (cur_m < end_m) {
             char ty[4]; size_t co, cs;
-            size_t next = box_next(file, end, cur, ty, &co, &cs);
+            size_t next = box_next(moov_data, end_m, cur_m, ty, &co, &cs);
             if (!next) break;
             if (memcmp(ty, "udta", 4) != 0) {
-                bb_put(&moov_body, file + cur, next - cur);
+                bb_put(&moov_body, moov_data + cur_m, next - cur_m);
             }
-            cur = next;
+            cur_m = next;
         }
     }
 
@@ -616,22 +629,50 @@ static int m4a_tag(const char *path, const Track *t, const char *cover_path) {
     }
     bb_free(&moov_body);
 
+    int moov_before_mdat = (moov_start < mdat_start);
     if (moov_before_mdat) {
-        int64_t delta = (int64_t)new_moov.len - (int64_t)(moov_end_abs - moov_start);
+        int64_t delta = (int64_t)new_moov.len - (int64_t)moov_len;
         if (delta != 0)
             patch_offsets(new_moov.d, 8, new_moov.len - 8, delta);
     }
 
-    Bb out = {0};
-    bb_put(&out, file, moov_start);
-    bb_put(&out, new_moov.d, new_moov.len);
-    bb_put(&out, file + moov_end_abs, fsz - moov_end_abs);
+    /* write to temp file */
+    char tmp_path[1024];
+    snprintf(tmp_path, sizeof tmp_path, "%s.sqttmp", path);
+    FILE *out = fopen(tmp_path, "wb");
+    if (!out) {
+        free(ftyp_data); free(moov_data); bb_free(&new_moov); fclose(in);
+        return -1;
+    }
 
-    free(file);
-    bb_free(&new_moov);
+    int ok = 1;
+    if (ftyp_data) ok = (fwrite(ftyp_data, 1, ftyp_len, out) == ftyp_len);
     
-    int ok = file_write_atomic(path, out.d, out.len);
-    bb_free(&out);
+    if (ok) {
+        if (moov_before_mdat) {
+            /* 1. new moov */
+            if (fwrite(new_moov.d, 1, new_moov.len, out) != new_moov.len) ok = 0;
+            /* 2. any boxes between old moov and mdat? 
+               (simplified: we assume ftyp -> moov -> mdat or ftyp -> mdat -> moov) */
+            if (ok) ok = stream_audio(out, in, (long)(mdat_start));
+        } else {
+            /* mdat then moov */
+            if (ok) ok = stream_audio(out, in, (long)(mdat_start));
+            if (ok) ok = (fwrite(new_moov.d, 1, new_moov.len, out) == new_moov.len);
+        }
+    }
+
+    fclose(out); fclose(in);
+    free(ftyp_data); free(moov_data); bb_free(&new_moov);
+
+    if (!ok) { remove(tmp_path); return -1; }
+
+#ifdef _WIN32
+    remove(path);
+    ok = MoveFileA(tmp_path, path) != 0;
+#else
+    ok = rename(tmp_path, path) == 0;
+#endif
     return ok ? 0 : -1;
 }
 

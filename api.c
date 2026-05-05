@@ -10,7 +10,11 @@
 
 // quality names
 const char *const QUALITY_LABELS[QUALITY_COUNT] = {
-    "Best Available"
+    "Hi-Res Lossless",
+    "Lossless",
+    "High (320kbps)",
+    "Low (96kbps)",
+    "Dolby Atmos"
 };
 
 // http stuff: winhttp on windows, curl on linux/mac
@@ -156,15 +160,57 @@ char *http_get(const char *url) {
     return res;
 }
 
-long http_get_file(const char *url, const char *path) {
-    FILE *f=fopen(path,"wb");
-    if(!f){SQT_LOG("fopen failed: %s", path);return -1;}
-    SQT_LOG("Downloading from: %s", url);
-    int s=wh_do(url,NULL,f,60000);
-    long sz=(long)ftell(f); fclose(f);
-    if(s==0){remove(path);SQT_LOG("WinHTTP connection failed (URL too long or TLS error?)");return -1;}
-    if(s<200||s>=400){remove(path);SQT_LOG("HTTP %d for download URL: %s", s,url);return -1;}
-    return sz;
+long http_get_file(const char *url, const char *path,
+                    void (*progress_cb)(size_t received, size_t total, void *ud), void *ud) {
+    wchar_t wu[4096];
+    if (!MultiByteToWideChar(CP_UTF8,0,url,-1,wu,(int)(sizeof(wu)/sizeof(*wu)))) return -1;
+    URL_COMPONENTS uc; memset(&uc,0,sizeof uc); uc.dwStructSize=sizeof uc;
+    wchar_t whost[512]={0},wpath[4096]={0};
+    uc.lpszHostName=whost; uc.dwHostNameLength=512;
+    uc.lpszUrlPath=wpath;  uc.dwUrlPathLength=4096;
+    if (!WinHttpCrackUrl(wu,0,0,&uc)) return -1;
+    if (!wpath[0]){wpath[0]=L'/';wpath[1]=0;}
+    DWORD toms=60000;
+    HINTERNET hs=WinHttpOpen(L"squidget/2.0",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
+        WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
+    if (!hs) return -1;
+    WinHttpSetOption(hs,WINHTTP_OPTION_CONNECT_TIMEOUT,&toms,sizeof toms);
+    WinHttpSetOption(hs,WINHTTP_OPTION_RECEIVE_TIMEOUT,&toms,sizeof toms);
+    HINTERNET hc=WinHttpConnect(hs,whost,uc.nPort,0);
+    if (!hc){WinHttpCloseHandle(hs);return -1;}
+    DWORD fl=(uc.nScheme==INTERNET_SCHEME_HTTPS)?WINHTTP_FLAG_SECURE:0;
+    HINTERNET hr=WinHttpOpenRequest(hc,L"GET",wpath,NULL,
+        WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,fl);
+    if (!hr){WinHttpCloseHandle(hc);WinHttpCloseHandle(hs);return -1;}
+    DWORD redir=WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
+    WinHttpSetOption(hr,WINHTTP_OPTION_REDIRECT_POLICY,&redir,sizeof redir);
+
+    long total_sz = -1;
+    if (WinHttpSendRequest(hr,WINHTTP_NO_ADDITIONAL_HEADERS,0,WINHTTP_NO_REQUEST_DATA,0,0,0)
+        && WinHttpReceiveResponse(hr,NULL)) {
+        DWORD clen=0,clenl=sizeof clen;
+        if (WinHttpQueryHeaders(hr, WINHTTP_QUERY_CONTENT_LENGTH|WINHTTP_QUERY_FLAG_NUMBER,
+                                NULL, &clen, &clenl, NULL)) {
+            total_sz = (long)clen;
+        }
+
+        FILE *f = fopen(path, "wb");
+        if (f) {
+            DWORD avail=0,nr=0;
+            size_t received = 0;
+            while (WinHttpQueryDataAvailable(hr,&avail)&&avail>0) {
+                char chunk[16384];
+                DWORD want=avail<(DWORD)sizeof chunk?avail:(DWORD)sizeof chunk;
+                if (!WinHttpReadData(hr,chunk,want,&nr)||nr==0) break;
+                fwrite(chunk, 1, nr, f);
+                received += nr;
+                if (progress_cb) progress_cb(received, (size_t)total_sz, ud);
+            }
+            fclose(f);
+        }
+    }
+    WinHttpCloseHandle(hr);WinHttpCloseHandle(hc);WinHttpCloseHandle(hs);
+    return total_sz;
 }
 
 char *http_post(const char *url, const char *json_body) {
@@ -262,22 +308,29 @@ char *http_get(const char *url) {
     return res;
 }
 
-long http_get_file(const char *url, const char *path) {
+long http_get_file(const char *url, const char *path,
+                    void (*progress_cb)(size_t received, size_t total, void *ud), void *ud) {
     FILE *f = fopen(path, "wb");
     if (!f) return -1;
-    CURL *c = curl_new(60L);
+    CURL *c = curl_new(120L);
     if (!c) { fclose(f); remove(path); return -1; }
+    CurlProg cp = {progress_cb, ud};
     curl_easy_setopt(c, CURLOPT_URL,           url);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, curl_write_file);
     curl_easy_setopt(c, CURLOPT_WRITEDATA,     f);
+    curl_easy_setopt(c, CURLOPT_NOPROGRESS,    0L);
+    curl_easy_setopt(c, CURLOPT_XFERINFOFUNCTION, curl_progress_cb);
+    curl_easy_setopt(c, CURLOPT_XFERINFODATA,     &cp);
     CURLcode rc = curl_easy_perform(c);
     long http_code = 0;
     curl_easy_getinfo(c, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_off_t total_sz = 0;
+    curl_easy_getinfo(c, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &total_sz);
     curl_easy_cleanup(c);
     long sz = (long)ftell(f);
     fclose(f);
     if (rc != CURLE_OK || http_code < 200 || http_code >= 400) { remove(path); return -1; }
-    return sz > 0 ? sz : -1;
+    return (long)total_sz > 0 ? (long)total_sz : sz;
 }
 
 char *http_post(const char *url, const char *json_body) {
@@ -374,24 +427,36 @@ char *http_get(const char *url) {
     return res;
 }
 
-long http_get_file(const char *url, const char *path) {
+long http_get_file(const char *url, const char *path,
+                    void (*progress_cb)(size_t received, size_t total, void *ud), void *ud) {
     char esc_url[4096], esc_path[4096];
     shell_escape(url,  esc_url,  sizeof esc_url);
     shell_escape(path, esc_path, sizeof esc_path);
     char cmd[8192];
+    
+    /* On POSIX without libcurl, we'll use curl to write to stdout and we read it manually 
+       to provide progress updates. */
     snprintf(cmd, sizeof cmd,
-             "curl -sSL --max-time 60 -A 'squidget/2.0' -o '%s' '%s'",
-             esc_path, esc_url);
+             "curl -sSL --max-time 120 -A 'squidget/2.0' '%s'",
+             esc_url);
     FILE *p = popen(cmd, "r");
-    if (!p) { remove(path); return -1; }
-    int curl_ret = pclose(p);
-    if (curl_ret != 0) { remove(path); return -1; }  /* curl failed (404, timeout, etc.) */
-    FILE *f = fopen(path, "rb");
-    if (!f) return -1;
-    fseek(f, 0, SEEK_END);
-    long sz = ftell(f);
+    if (!p) return -1;
+    
+    FILE *f = fopen(path, "wb");
+    if (!f) { pclose(p); return -1; }
+    
+    char chunk[16384];
+    size_t n, received = 0;
+    while ((n = fread(chunk, 1, sizeof chunk, p)) > 0) {
+        fwrite(chunk, 1, n, f);
+        received += n;
+        if (progress_cb) progress_cb(received, 0, ud); /* total unknown via pipe */
+    }
+    
     fclose(f);
-    return sz > 0 ? sz : -1;
+    int curl_ret = pclose(p);
+    if (curl_ret != 0) { remove(path); return -1; }
+    return (long)received;
 }
 
 char *http_post(const char *url, const char *json_body) {
@@ -409,6 +474,27 @@ char *http_post(const char *url, const char *json_body) {
 
 #endif /* SQT_USE_CURL */
 #endif /* _WIN32 */
+
+char *api_get_lyrics(const char *isrc) {
+    if (!isrc || !*isrc) return NULL;
+    char url[512];
+    snprintf(url, sizeof url, "https://lrclib.net/api/get?isrc=%s", isrc);
+    char *resp = http_get(url);
+    if (!resp) return NULL;
+    JNode *root = json_parse(resp); free(resp);
+    if (!root) return NULL;
+    
+    const char *synced = jstr(jobj_get(root, "syncedLyrics"));
+    char *res = NULL;
+    if (synced && *synced) {
+        res = strdup(synced);
+    } else {
+        const char *plain = jstr(jobj_get(root, "plainLyrics"));
+        if (plain && *plain) res = strdup(plain);
+    }
+    json_free(root);
+    return res;
+}
 
 // api stuff — Qobuz native
 

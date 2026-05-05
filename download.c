@@ -17,29 +17,105 @@
 /* cover_url is now a full https:// URL (Qobuz album.image.large) */
 static int fetch_cover(const char *cover_url, const char *dest) {
     if (!cover_url || !cover_url[0]) return 0;
-    return (http_get_file(cover_url, dest) > 0) ? 1 : 0;
+    return (http_get_file(cover_url, dest, NULL, NULL) > 0) ? 1 : 0;
+}
+
+static int sqt_case_match(const char *s, const char *ref) {
+    while (*s && *ref) {
+        char c1 = *s;
+        char c2 = *ref;
+        if (c1 >= 'a' && c1 <= 'z') c1 -= 32;
+        if (c2 >= 'a' && c2 <= 'z') c2 -= 32;
+        if (c1 != c2) return 0;
+        s++; ref++;
+    }
+    return *ref == '\0';
 }
 
 void sqt_sanitise(const char *in, char *out, size_t outsz) {
     size_t j = 0;
     for (const char *p = in; *p && j + 1 < outsz; p++) {
         char c = *p;
+        /* illegal characters on windows/posix */
         if (c == '/' || c == '\\' || c == ':' || c == '*' ||
             c == '?' || c == '"'  || c == '<' || c == '>' || c == '|')
             c = '_';
+        /* control characters */
+        if ((unsigned char)c < 32) c = '_';
         out[j++] = c;
     }
     out[j] = '\0';
+
+    /* strip trailing dots and spaces (illegal on Windows) */
+    while (j > 0 && (out[j-1] == '.' || out[j-1] == ' ')) {
+        out[--j] = '\0';
+    }
+
+    if (j == 0) {
+        snprintf(out, outsz, "unnamed");
+        return;
+    }
+
+    /* check for windows reserved names (CON, PRN, AUX, NUL, COM1-9, LPT1-9) */
+    static const char *res[] = {
+        "CON", "PRN", "AUX", "NUL",
+        "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9",
+        "LPT1", "LPT2", "LPT3", "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9"
+    };
+    for (size_t i = 0; i < sizeof(res)/sizeof(res[0]); i++) {
+        size_t rlen = strlen(res[i]);
+        if (sqt_case_match(out, res[i])) {
+            if (out[rlen] == '\0' || out[rlen] == '.') {
+                /* prepend underscore to bypass reserved name check */
+                char tmp[1024];
+                snprintf(tmp, sizeof(tmp), "_%s", out);
+                snprintf(out, outsz, "%s", tmp);
+                break;
+            }
+        }
+    }
+}
+
+typedef struct {
+    uint64_t start_time;
+    uint64_t last_report_time;
+    void (*cb)(const char *msg, void *ud);
+    void *ud;
+} AnalyticsCtx;
+
+static void internal_progress_cb(size_t received, size_t total, void *ud) {
+    AnalyticsCtx *ctx = ud;
+    uint64_t now = sqt_time_ms();
+    if (now - ctx->last_report_time < 250 && received < total && received > 0) return;
+    ctx->last_report_time = now;
+
+    double elapsed = (double)(now - ctx->start_time) / 1000.0;
+    if (elapsed < 0.01) elapsed = 0.01;
+    double speed = (double)received / (1024.0 * 1024.0 * elapsed);
+
+    char msg[128];
+    if (total > 0) {
+        int pct = (int)((double)received * 100.0 / (double)total);
+        double rem = (double)(total - received) / ((double)received / elapsed);
+        if (received == 0) rem = 0;
+        int rm = (int)rem / 60, rs = (int)rem % 60;
+        snprintf(msg, sizeof msg, "downloading… %3d%% (%.1f MB/s) %02d:%02d left", 
+                 pct, speed, rm, rs);
+    } else {
+        snprintf(msg, sizeof msg, "downloading… %.1f MB (%.1f MB/s)", 
+                 (double)received / (1024.0 * 1024.0), speed);
+    }
+    ctx->cb(msg, ctx->ud);
 }
 
 static int download_single_url(const char *url, const char *out_path,
                                 void (*progress_cb)(const char *msg, void *ud), void *ud) {
-    if (progress_cb) progress_cb("downloading…", ud);
-
+    AnalyticsCtx actx = { sqt_time_ms(), 0, progress_cb, ud };
+    
     char tmp_path[1200];
     snprintf(tmp_path, sizeof(tmp_path), "%s.sqtmp", out_path);
 
-    if (http_get_file(url, tmp_path) < 0) {
+    if (http_get_file(url, tmp_path, internal_progress_cb, &actx) < 0) {
         remove(tmp_path);
         return -1;
     }
@@ -99,6 +175,12 @@ static void tag_and_clean(const Track *t, const char *final_out,
         (void)api_get_track_info(t->id, &rich);
     }
 
+    /* Fetch lyrics by ISRC */
+    if (rich.isrc[0]) {
+        if (progress_cb) progress_cb("fetching lyrics…", ud);
+        rich.lyrics = api_get_lyrics(rich.isrc);
+    }
+
     char cover_tmp[1024] = {0};
     int cover_owned = 0;
     if (preloaded_cover && preloaded_cover[0]) {
@@ -117,6 +199,7 @@ static void tag_and_clean(const Track *t, const char *final_out,
     if (tag_ret != 0 && progress_cb)
         progress_cb("warning: tagging failed (file still saved)", ud);
 
+    if (rich.lyrics) free(rich.lyrics);
     if (cover_tmp[0] && cover_owned) remove(cover_tmp);
 }
 
