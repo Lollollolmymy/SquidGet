@@ -20,6 +20,7 @@
 #define SQT_YEAR_SZ        8
 #define SQT_ISRC_SZ       32
 #define SQT_CPR_SZ       256
+#define SQT_MAX_PLAYLISTS  64
 
 /* quality labels */
 #define QUAL_HIR  "HI_RES_LOSSLESS"
@@ -35,6 +36,7 @@ extern const char *const QUALITY_LABELS[QUALITY_COUNT];
 typedef enum {
     SEARCH_SONGS = 0,
     SEARCH_ALBUMS,
+    SEARCH_PLAYLISTS,
 } SearchType;
 
 /* ── Track ── */
@@ -64,6 +66,12 @@ typedef struct {
     int  num_tracks;
 } Album;
 
+typedef struct {
+    char url[SQT_URL_SZ];
+    char title[SQT_TITLE_SZ];
+    int track_count;
+} Playlist;
+
 /* ── TUI modes ── */
 typedef enum {
     MODE_SEARCH = 0,   /* typing a query                   */
@@ -73,6 +81,7 @@ typedef enum {
     MODE_SETUP,        /* first-run save-location UI        */
     MODE_ALBUM_ACTION, /* download album or browse songs    */
     MODE_HELP,         /* keybinding help overlay           */
+    MODE_PLAYLIST_TRACKS,
 } Mode;
 
 /* frame-buffer row
@@ -91,8 +100,11 @@ typedef enum {
     TASK_DOWNLOAD,
     TASK_ALBUM_SEARCH,
     TASK_ALBUM_TRACKS,
-    TASK_ALBUM_DOWNLOAD
+    TASK_ALBUM_DOWNLOAD,
+    TASK_PLAYLIST_FETCH,
+    TASK_PLAYLIST_DOWNLOAD
 } TaskType;
+
 
 typedef struct {
     TaskType type;
@@ -100,7 +112,10 @@ typedef struct {
     char     track_id[SQT_ID_SZ];
     char     album_id[SQT_ID_SZ];
     char     album_name[SQT_TITLE_SZ];
+    char     playlist_url[SQT_URL_SZ];
+    char     playlist_name[SQT_TITLE_SZ];
     char     quality[SQT_QUAL_SZ];
+    Track    track;
 } SQTTask;
 
 #define SQT_MAX_QUEUE 64
@@ -128,6 +143,11 @@ typedef struct {
     /* album results */
     Album albums[SQT_MAX_RESULTS];
     int   album_count;
+
+    Playlist playlists[SQT_MAX_PLAYLISTS];
+    int      playlist_count;
+    char     current_playlist_url[SQT_URL_SZ];
+    int      current_playlist_index;
 
     /* album action picker */
     int album_action_cursor; /* 0=download complete, 1=browse songs */
@@ -175,29 +195,56 @@ typedef struct {
 /* ── config.c ── */
 int  config_load(AppState *s);
 void config_save(AppState *s);
+void config_load_playlists(AppState *s);
+void config_save_playlists(AppState *s);
 
 /* ── platform.c ── */
 /* Opens the OS-native folder picker; returns 1 + fills buf on success. */
 int  gui_pick_folder(char *buf, size_t bufsz);
 
 /* ── api.c ── */
-/* Initialise / teardown HTTP layer (no-op without SQT_USE_CURL). Call once. */
+/* Initialise / teardown HTTP layer. POSIX builds require libcurl; Windows uses WinHTTP. Call once. */
 void  http_init(void);
 void  http_cleanup(void);
 char *http_get(const char *url);
+typedef struct {
+    long http_code;
+    long retry_after_sec;
+    char content_type[128];
+    char effective_url[SQT_URL_SZ];
+} HttpFileInfo;
 long  http_get_file(const char *url, const char *path,
                     void (*progress_cb)(size_t received, size_t total, void *ud), void *ud);
+long  http_get_file_ex(const char *url, const char *path,
+                       void (*progress_cb)(size_t received, size_t total, void *ud), void *ud,
+                       HttpFileInfo *info);
 /* POST request with JSON body — returns allocated response body or NULL */
 char *http_post(const char *url, const char *json_body);
+const char *api_last_error(void);
 int   api_search_tracks(const char *query, Track *out, int max);
 int   api_search_albums(const char *query, Album *out, int max);
 int   api_get_album_tracks(const char *album_id, Track *out, int max);
+int   api_fetch_playlist(const char *url, Playlist *meta, Track *tracks, int max);
 /* fetches /info/ for a single track — fills cover, year, ISRC, etc. */
 int   api_get_track_info(const char *track_id, Track *out);
 char *api_get_lyrics(const char *isrc);
-/* Qobuz fallback: resolves ISRC → direct Akamai FLAC URL via zarz.moe.
+/* Qobuz resolver: resolves ISRC or title metadata through the configured non-Amazon resolver.
    Returns 1 + fills out_url (size sz) on success; 0 on failure. */
-int   api_qobuz_get_stream_url(const char *isrc, char *out_url, size_t sz);
+int   api_qobuz_get_stream_url(const char *isrc, const char *quality, char *out_url, size_t sz);
+int   api_qobuz_get_stream_url_err(const char *isrc, const char *quality,
+                                   char *out_url, size_t sz,
+                                   char *err, size_t errsz);
+/* Try to resolve stream URL for a track using title+artist (Qobuz fallback for iTunes results) */
+int   api_qobuz_get_stream_url_by_title_err(const char *title, const char *artist,
+                                            int duration, const char *quality,
+                                            char *out_url, size_t sz,
+                                            char *err, size_t errsz);
+void  api_qobuz_invalidate_stream_url(const char *url);
+void  api_qobuz_note_download_response(long http_code, const char *content_type,
+                                       long retry_after_sec, int media_ok);
+int   api_qobuz_retry_delay_ms(int attempt);
+int   api_qobuz_cooldown_remaining_ms(void);
+const char *sqt_quality_expected_ext(const char *quality);
 
 /* ── download.c ── */
 /* sanitise a filename/directory component — strips / \ : * ? " < > | */

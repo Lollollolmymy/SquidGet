@@ -45,6 +45,16 @@ static void config_file(char *buf, size_t sz) {
 #endif
 }
 
+static void playlists_file(char *buf, size_t sz) {
+    char dir[512];
+    config_dir(dir, sizeof(dir));
+#ifdef _WIN32
+    snprintf(buf, sz, "%s\\playlists", dir);
+#else
+    snprintf(buf, sz, "%s/playlists", dir);
+#endif
+}
+
 // make config dir if needed
 static void ensure_config_dir(void) {
     char dir[512];
@@ -106,6 +116,56 @@ void config_save(AppState *s) {
     fclose(f);
 
     /* Atomic replace */
+#ifdef _WIN32
+    remove(path);
+#endif
+    rename(tmp_path, path);
+}
+
+static void strip_line_end(char *s) {
+    size_t n = strlen(s);
+    while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r'))
+        s[--n] = '\0';
+}
+
+void config_load_playlists(AppState *s) {
+    char path[600];
+    playlists_file(path, sizeof(path));
+    FILE *f = fopen(path, "r");
+    if (!f) return;
+
+    char line[1600];
+    while (s->playlist_count < SQT_MAX_PLAYLISTS && fgets(line, sizeof(line), f)) {
+        strip_line_end(line);
+        if (!line[0]) continue;
+        char *tab = strchr(line, '\t');
+        Playlist *p = &s->playlists[s->playlist_count];
+        memset(p, 0, sizeof(*p));
+        if (tab) {
+            *tab = '\0';
+            snprintf(p->title, sizeof(p->title), "%s", line);
+            snprintf(p->url, sizeof(p->url), "%s", tab + 1);
+        } else {
+            snprintf(p->url, sizeof(p->url), "%s", line);
+            snprintf(p->title, sizeof(p->title), "%s", line);
+        }
+        if (p->url[0]) s->playlist_count++;
+    }
+    fclose(f);
+}
+
+void config_save_playlists(AppState *s) {
+    ensure_config_dir();
+    char path[600], tmp_path[620];
+    playlists_file(path, sizeof(path));
+    snprintf(tmp_path, sizeof(tmp_path), "%s.tmp", path);
+    FILE *f = fopen(tmp_path, "w");
+    if (!f) return;
+    for (int i = 0; i < s->playlist_count; i++) {
+        if (!s->playlists[i].url[0]) continue;
+        fprintf(f, "%s\t%s\n", s->playlists[i].title, s->playlists[i].url);
+    }
+    fclose(f);
 #ifdef _WIN32
     remove(path);
 #endif

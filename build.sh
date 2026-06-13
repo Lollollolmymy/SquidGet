@@ -34,7 +34,7 @@ case "$OS" in
             exit 1
         fi
 
-        # Compile with libcurl if available
+        # libcurl is required on macOS/Linux. SquidGet does not shell out to curl at runtime.
         CURL_FLAGS=""
         if command -v pkg-config &> /dev/null && pkg-config --exists libcurl; then
             CURL_FLAGS=$(pkg-config --cflags --libs libcurl)
@@ -42,10 +42,14 @@ case "$OS" in
         elif [ -d "/opt/homebrew/opt/curl" ]; then
             CURL_FLAGS="-I/opt/homebrew/opt/curl/include -L/opt/homebrew/opt/curl/lib -lcurl"
             echo "[squidget] libcurl found via Homebrew, enabling..."
+        else
+            echo "Error: libcurl development files are required."
+            echo "Install with: brew install curl pkg-config"
+            exit 1
         fi
         
         # Compile
-        gcc -std=c11 -Wall -Wextra -O2 \
+        gcc -std=c11 -Wall -Wextra -Wno-unused-function -O2 \
             main.c api.c download.c tui.c json.c config.c platform.c tag.c \
             -lpthread $CURL_FLAGS -DSQT_USE_CURL -o squidget
         
@@ -86,7 +90,7 @@ case "$OS" in
             fi
         fi
 
-        # Compile with libcurl if available
+        # libcurl is required on macOS/Linux. SquidGet does not shell out to curl at runtime.
         CURL_FLAGS=""
         if command -v pkg-config &> /dev/null && pkg-config --exists libcurl; then
             CURL_FLAGS=$(pkg-config --cflags --libs libcurl)
@@ -94,10 +98,14 @@ case "$OS" in
         elif [ -d "/opt/homebrew/opt/curl" ]; then
             CURL_FLAGS="-I/opt/homebrew/opt/curl/include -L/opt/homebrew/opt/curl/lib -lcurl"
             echo "[squidget] libcurl found via Homebrew, enabling..."
+        else
+            echo "Error: libcurl development files are required."
+            echo "Install libcurl development headers using your package manager."
+            exit 1
         fi
         
         # Compile
-        gcc -std=c11 -Wall -Wextra -O2 \
+        gcc -std=c11 -Wall -Wextra -Wno-unused-function -O2 \
             main.c api.c download.c tui.c json.c config.c platform.c tag.c \
             -lpthread $CURL_FLAGS -DSQT_USE_CURL -o squidget
         

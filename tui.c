@@ -38,6 +38,9 @@ static DWORD g_orig_in, g_orig_out;
 #define C_ORANGE   "\033[38;5;209m"
 #define C_GOLD     "\033[38;5;221m"
 #define C_PINK     "\033[38;5;211m"
+#define C_GREEN    "\033[38;5;46m"
+#define C_GREEN_D  "\033[38;5;40m"
+#define C_GREEN_L  "\033[38;5;120m"
 #define C_GREY_L   "\033[38;5;250m"
 #define C_GREY_D   "\033[38;5;240m"
 #define C_BG_SEL   "\033[48;5;236m"
@@ -77,6 +80,20 @@ static const ColorScheme ALBUM_SCHEME = {
     .text_dim = "\033[38;5;244m"
 };
 
+static const ColorScheme PLAYLIST_SCHEME = {
+    .border   = C_GREEN,
+    .logo     = C_GREEN_L,
+    .hdr      = C_GREEN_D,
+    .sel_num  = C_GREEN_L,
+    .keyname  = C_GREEN_L,
+    .prompt   = C_GREEN_L,
+    .qsel     = C_GREEN_L,
+    .cursor   = C_GREEN,
+    .mode     = C_GREEN,
+    .text_hi  = "\033[38;5;255m",
+    .text_dim = "\033[38;5;244m"
+};
+
 /* Box Drawing (Rounded) */
 #define B_TL "\xe2\x95\xad" /* ╭ */
 #define B_TR "\xe2\x95\xae" /* ╮ */
@@ -91,7 +108,7 @@ static const char *SPIN[] = {"⠋","⠙","⠹","⠸","⠼","⠴","⠦","⠧","�
 #define NSPIN 10
 #define IND "▶"
 
-#define TC(s) ((s)->search_type == SEARCH_ALBUMS ? &ALBUM_SCHEME : &SONG_SCHEME)
+#define TC(s) ((s)->search_type == SEARCH_PLAYLISTS ? &PLAYLIST_SCHEME : (s)->search_type == SEARCH_ALBUMS ? &ALBUM_SCHEME : &SONG_SCHEME)
 
 /* Row builder */
 static char g_row[FB_ROW_SZ];
@@ -344,12 +361,13 @@ static void render_search_bar(AppState *s, int W) {
     int used = 2;
     
     const char *badge = 
-        s->mode == MODE_SEARCH  ? (s->search_type == SEARCH_ALBUMS ? " ALBUM SEARCH " : " SONG SEARCH ") :
-        s->mode == MODE_RESULTS ? (s->search_type == SEARCH_ALBUMS ? " ALBUM RESULTS " : " SONG RESULTS ") :
+        s->mode == MODE_SEARCH  ? (s->search_type == SEARCH_PLAYLISTS ? " PLAYLIST SEARCH " : s->search_type == SEARCH_ALBUMS ? " ALBUM SEARCH " : " SONG SEARCH ") :
+        s->mode == MODE_RESULTS ? (s->search_type == SEARCH_PLAYLISTS ? " PLAYLISTS " : s->search_type == SEARCH_ALBUMS ? " ALBUM RESULTS " : " SONG RESULTS ") :
         s->mode == MODE_ALBUM_TRACKS ? " ALBUM TRACKS " :
+        s->mode == MODE_PLAYLIST_TRACKS ? " PLAYLIST TRACKS " :
         s->mode == MODE_SETUP   ? " SETUP " :
         s->mode == MODE_HELP    ? " HELP " :
-        s->mode == MODE_ALBUM_ACTION ? " ALBUM " : " QUALITY ";
+        s->mode == MODE_ALBUM_ACTION ? (s->search_type == SEARCH_PLAYLISTS ? " PLAYLIST " : " ALBUM ") : " QUALITY ";
     
     rb_s("\033[48;5;236m");
     rb_s(c->mode);
@@ -398,7 +416,9 @@ static void render_header(AppState *s, int inner, int tw, int aw) {
     rb_s(B_ML A_RST);
     
     char hdr[512];
-    if (s->search_type == SEARCH_ALBUMS)
+    if (s->search_type == SEARCH_PLAYLISTS && s->mode != MODE_PLAYLIST_TRACKS)
+        snprintf(hdr, sizeof(hdr), " %3s  %-*s  %-*s  %s", "#", tw, "playlist", aw, "source", "trk");
+    else if (s->search_type == SEARCH_ALBUMS)
         snprintf(hdr, sizeof(hdr), " %3s  %-*s  %-*s  %s", "#", tw, "album", aw, "artist", "trk");
     else
         snprintf(hdr, sizeof(hdr), " %3s  %-*s  %-*s  %s", "#", tw, "title", aw, "artist", "dur");
@@ -421,7 +441,8 @@ static void render_list_row(AppState *s, int r, int idx, int inner, int tw, int 
     rb_s(c->border);
     rb_s(B_VL A_RST);
     
-    int total = (s->mode == MODE_ALBUM_TRACKS || s->search_type == SEARCH_SONGS) ? s->track_count : s->album_count;
+    int total = (s->search_type == SEARCH_PLAYLISTS && s->mode != MODE_PLAYLIST_TRACKS) ? s->playlist_count :
+        (s->mode == MODE_ALBUM_TRACKS || s->mode == MODE_PLAYLIST_TRACKS || s->search_type == SEARCH_SONGS) ? s->track_count : s->album_count;
     int nlist = s->rows - 5;
     if (nlist < 1) nlist = 1;
     
@@ -449,7 +470,26 @@ static void render_list_row(AppState *s, int r, int idx, int inner, int tw, int 
             rb_s("  ");
         }
         
-        if (s->mode == MODE_ALBUM_TRACKS) {
+        if (s->search_type == SEARCH_PLAYLISTS && s->mode != MODE_PLAYLIST_TRACKS) {
+            char ptitle[SQT_TITLE_SZ];
+            trunc_to(s->playlists[idx].title, ptitle, sizeof(ptitle), tw);
+            if (is_sel) { rb_s(c->text_hi); rb_s(A_BOLD); } else { rb_s(C_GREY_L); }
+            rb_s(ptitle);
+            rb_pad(tw - utf8_width(ptitle) + 1);
+
+            char src[SQT_TITLE_SZ];
+            const char *provider = strstr(s->playlists[idx].url, "spotify") ? "Spotify" :
+                                   strstr(s->playlists[idx].url, "music.apple") ? "Apple Music" : "Link";
+            snprintf(src, sizeof(src), "%s", provider);
+            rb_s(is_sel ? c->text_hi : c->text_dim);
+            rb_s(src);
+            rb_pad(aw - utf8_width(src) + 1);
+
+            char trkcnt[8];
+            snprintf(trkcnt, sizeof(trkcnt), "%3d", s->playlists[idx].track_count % 1000);
+            rb_s(is_sel ? c->text_hi : C_GREY_D);
+            rb_s(trkcnt);
+        } else if (s->mode == MODE_ALBUM_TRACKS || s->mode == MODE_PLAYLIST_TRACKS) {
             char ttitl[SQT_TITLE_SZ];
             trunc_to(s->tracks[idx].title, ttitl, sizeof(ttitl), tw);
             if (is_sel) { rb_s(c->text_hi); rb_s(A_BOLD); } else { rb_s(C_GREY_L); }
@@ -555,10 +595,15 @@ static void render_status_bar(AppState *s, int W) {
         kb[nkb++] = (KB){"enter", "select"};
         kb[nkb++] = (KB){"?", "help"};
         kb[nkb++] = (KB){"^U", "clear"};
-        kb[nkb++] = (KB){"tab", s->search_type == SEARCH_ALBUMS ? "songs" : "albums"};
+        kb[nkb++] = (KB){"tab", s->search_type == SEARCH_SONGS ? "albums" : s->search_type == SEARCH_ALBUMS ? "playlists" : "songs"};
     } else if (s->mode == MODE_ALBUM_TRACKS) {
         kb[nkb++] = (KB){"↑↓", "nav"};
         kb[nkb++] = (KB){"enter", "download"};
+        kb[nkb++] = (KB){"esc", "back"};
+    } else if (s->mode == MODE_PLAYLIST_TRACKS) {
+        kb[nkb++] = (KB){"↑↓", "nav"};
+        kb[nkb++] = (KB){"enter", "download"};
+        kb[nkb++] = (KB){"a", "all"};
         kb[nkb++] = (KB){"esc", "back"};
     } else if (s->mode == MODE_QUALITY) {
         kb[nkb++] = (KB){"↑↓", "move"};
@@ -623,7 +668,7 @@ static void render_help_row(AppState *s, int r, int inner, int list_top) {
         {"UP/DOWN",   "Navigate results"},
         {"PGUP/PGDN", "Scroll page"},
         {"ENTER",     "Download / Select"},
-        {"TAB",       "Toggle Song/Album search"},
+        {"TAB",       "Toggle Song/Album/Playlist search"},
         {"s",         "Save preferred quality"},
         {"?",         "Toggle this help"},
         {"^U",        "Clear search query"},
@@ -735,14 +780,15 @@ static void render_quality_row(AppState *s, int r, int inner, int list_top) {
     } else if (r >= 2 && r < 2 + QUALITY_COUNT) {
         int qi = r - 2;
         int sel = (qi == s->qual_cursor);
-        char ql[128];
-        if (sel) snprintf(ql, sizeof(ql), "  " IND " %d. %s", qi + 1, QUALITY_LABELS[qi]);
-        else snprintf(ql, sizeof(ql), "     %d. %s", qi + 1, QUALITY_LABELS[qi]);
+        char ql[160];
+        const char *hint = sqt_quality_expected_ext(QUALITY_LABELS[qi]);
         if (sel) {
+            snprintf(ql, sizeof(ql), "  " IND " %d. %s (.%s)", qi + 1, QUALITY_LABELS[qi], hint);
             rb_s(c->qsel);
             rb_s(A_BOLD);
         } else {
-            rb_s(c->text_dim);
+            snprintf(ql, sizeof(ql), "     %d. %s (.%s)", qi + 1, QUALITY_LABELS[qi], hint);
+            rb_s(c->text_hi);
         }
         rb_s(ql);
         rb_pad(inner - utf8_width(ql));
@@ -771,7 +817,13 @@ static void render_album_action_row(AppState *s, int r, int inner, int list_top)
     
     if (r == 0) {
         char atitl[256];
-        trunc_to(s->albums[s->cursor].title, atitl, sizeof(atitl), inner - 4);
+        if (s->search_type == SEARCH_PLAYLISTS &&
+            s->current_playlist_index >= 0 &&
+            s->current_playlist_index < s->playlist_count) {
+            trunc_to(s->playlists[s->current_playlist_index].title, atitl, sizeof(atitl), inner - 4);
+        } else {
+            trunc_to(s->albums[s->cursor].title, atitl, sizeof(atitl), inner - 4);
+        }
         rb_s(c->logo);
         rb_s(A_BOLD "  ");
         rb_s(atitl);
@@ -779,10 +831,19 @@ static void render_album_action_row(AppState *s, int r, int inner, int list_top)
         rb_s(A_RST);
     } else if (r == 1) {
         char art[256];
-        trunc_to(s->albums[s->cursor].artist, art, sizeof(art), inner - 6);
-        rb_s(A_DIM "  by ");
+        if (s->search_type == SEARCH_PLAYLISTS &&
+            s->current_playlist_index >= 0 &&
+            s->current_playlist_index < s->playlist_count) {
+            const char *provider = strstr(s->playlists[s->current_playlist_index].url, "spotify") ? "Spotify" :
+                                   strstr(s->playlists[s->current_playlist_index].url, "music.apple") ? "Apple Music" : "Playlist link";
+            trunc_to(provider, art, sizeof(art), inner - 8);
+            rb_s(A_DIM "  from ");
+        } else {
+            trunc_to(s->albums[s->cursor].artist, art, sizeof(art), inner - 6);
+            rb_s(A_DIM "  by ");
+        }
         rb_s(art);
-        rb_pad(inner - 5 - utf8_width(art));
+        rb_pad(inner - (s->search_type == SEARCH_PLAYLISTS ? 7 : 5) - utf8_width(art));
         rb_s(A_RST);
     } else if (r == 2) {
         rb_s(A_DIM "  choose action:" A_RST);
@@ -790,7 +851,10 @@ static void render_album_action_row(AppState *s, int r, int inner, int list_top)
     } else if (r == 3 || r == 4) {
         int ai = r - 3;
         int sel = (ai == s->album_action_cursor);
-        const char *labels[2] = {"Download complete album", "Browse individual songs"};
+        const char *labels[2] = {
+            s->search_type == SEARCH_PLAYLISTS ? "Download complete playlist" : "Download complete album",
+            "Browse individual songs"
+        };
         char ql[128];
         if (sel) snprintf(ql, sizeof(ql), "  " IND " %d. %s", ai + 1, labels[ai]);
         else snprintf(ql, sizeof(ql), "     %d. %s", ai + 1, labels[ai]);
@@ -844,7 +908,8 @@ void tui_render(AppState *s) {
     /* Render list rows based on mode */
     for (int r = 0; r < nlist; r++) {
         int idx = s->scroll + r;
-        int in_rng = (s->mode == MODE_ALBUM_TRACKS || s->search_type == SEARCH_SONGS) ? (idx < s->track_count) : (idx < s->album_count);
+        int in_rng = (s->search_type == SEARCH_PLAYLISTS && s->mode != MODE_PLAYLIST_TRACKS) ? (idx < s->playlist_count) :
+            (s->mode == MODE_ALBUM_TRACKS || s->mode == MODE_PLAYLIST_TRACKS || s->search_type == SEARCH_SONGS) ? (idx < s->track_count) : (idx < s->album_count);
         int is_sel = in_rng && (idx == s->cursor);
         
         if (s->mode == MODE_SETUP) {
@@ -855,7 +920,9 @@ void tui_render(AppState *s) {
             render_album_action_row(s, r, inner, list_top);
         } else if (s->mode == MODE_HELP) {
             render_help_row(s, r, inner, list_top);
-        } else if (s->mode == MODE_RESULTS || s->mode == MODE_SEARCH || s->mode == MODE_ALBUM_TRACKS) {
+        } else if (s->mode == MODE_RESULTS || s->mode == MODE_SEARCH ||
+                   s->mode == MODE_ALBUM_TRACKS ||
+                   s->mode == MODE_PLAYLIST_TRACKS) {
             render_list_row(s, r, idx, inner, tw, aw, is_sel, list_top);
         }
     }
@@ -896,9 +963,42 @@ void tui_cleanup(AppState *s) {
 int tui_read_key(AppState *s) {
     (void)s;
 #ifndef _WIN32
-    unsigned char buf[8] = {0};
+    static unsigned char pending[4096];
+    static int pend_len = 0;
+    static int pend_pos = 0;
+
+    if (pend_pos < pend_len) {
+        unsigned char c = pending[pend_pos++];
+        if (pend_pos >= pend_len) pend_pos = pend_len = 0;
+        if (c == 127 || c == 8) return KEY_BACKSPACE;
+        if (c == '\r' || c == '\n') return KEY_ENTER;
+        if (c == 3) return KEY_CTRL_C;
+        return c;
+    }
+
+    unsigned char buf[1024] = {0};
     int n = (int)read(STDIN_FILENO, buf, sizeof(buf));
     if (n <= 0) return 0;
+
+    /* Bracketed paste: ESC [ 200 ~ payload ESC [ 201 ~.
+       Keep only the payload and feed it back one byte at a time. */
+    if (n >= 6 && memcmp(buf, "\033[200~", 6) == 0) {
+        int start = 6;
+        int end = n;
+        for (int i = start; i + 5 < n; i++) {
+            if (memcmp(buf + i, "\033[201~", 6) == 0) { end = i; break; }
+        }
+        int len = end - start;
+        if (len > (int)sizeof(pending)) len = (int)sizeof(pending);
+        if (len > 0) {
+            memcpy(pending, buf + start, (size_t)len);
+            pend_len = len;
+            pend_pos = 0;
+            return tui_read_key(s);
+        }
+        return 0;
+    }
+
     if (n == 1) {
         if (buf[0] == 127 || buf[0] == 8) return KEY_BACKSPACE;
         if (buf[0] == '\r' || buf[0] == '\n') return KEY_ENTER;
@@ -906,6 +1006,18 @@ int tui_read_key(AppState *s) {
         if (buf[0] == 3) return KEY_CTRL_C;
         return buf[0];
     }
+
+    if (buf[0] != 27) {
+        int len = n - 1;
+        if (len > (int)sizeof(pending)) len = (int)sizeof(pending);
+        if (len > 0) {
+            memcpy(pending, buf + 1, (size_t)len);
+            pend_len = len;
+            pend_pos = 0;
+        }
+        return buf[0];
+    }
+
     if (n >= 3 && buf[0] == 27 && buf[1] == '[') {
         switch (buf[2]) {
             case 'A': return KEY_UP;
