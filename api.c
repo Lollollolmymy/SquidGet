@@ -382,6 +382,12 @@ static int lucida_url_p(const char *url) {
 #include <windows.h>
 #include <winhttp.h>
 
+/* Some bundled/minimal WinHTTP headers, including the TCC header shipped
+ * with SquidGet, do not define every standard query constant. */
+#ifndef WINHTTP_QUERY_CONTENT_LENGTH
+#define WINHTTP_QUERY_CONTENT_LENGTH 5
+#endif
+
 static int wh_do(const char *url, Buf *body, FILE *fp, DWORD toms) {
     // large url buffer for stream URLs
     wchar_t wu[8192];
