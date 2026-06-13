@@ -54,7 +54,8 @@ static inline void sqt_sleep_ms_impl(unsigned ms) {
 
 static inline uint64_t sqt_time_ms(void) {
 #ifdef _WIN32
-    return GetTickCount64();
+    /* TCC's bundled import library exposes GetTickCount, not GetTickCount64. */
+    return (uint64_t)GetTickCount();
 #else
     struct timespec ts;
     clock_gettime(CLOCK_MONOTONIC, &ts);

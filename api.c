@@ -21,6 +21,38 @@
 
 #define SQT_BROWSER_UA "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36"
 
+
+static char *sqt_strdup_cstr(const char *s) {
+    if (!s) return NULL;
+    size_t n = strlen(s) + 1;
+    char *p = malloc(n);
+    if (!p) return NULL;
+    memcpy(p, s, n);
+    return p;
+}
+
+static char *sqt_strtok_r(char *s, const char *delim, char **saveptr) {
+    char *p = s ? s : (saveptr ? *saveptr : NULL);
+    if (!p) return NULL;
+
+    p += strspn(p, delim);
+    if (!*p) {
+        if (saveptr) *saveptr = NULL;
+        return NULL;
+    }
+
+    char *tok = p;
+    p = strpbrk(tok, delim);
+    if (p) {
+        *p = '\0';
+        if (saveptr) *saveptr = p + 1;
+    } else {
+        if (saveptr) *saveptr = NULL;
+    }
+    return tok;
+}
+
+
 // quality names
 const char *const QUALITY_LABELS[QUALITY_COUNT] = {
     "Hi-Res Lossless",
@@ -381,35 +413,110 @@ static int lucida_url_p(const char *url) {
 #ifdef _WIN32
 #include <windows.h>
 #include <winhttp.h>
+#include <wchar.h>
 
 /* Some bundled/minimal WinHTTP headers, including the TCC header shipped
  * with SquidGet, do not define every standard query constant. */
 #ifndef WINHTTP_QUERY_CONTENT_LENGTH
 #define WINHTTP_QUERY_CONTENT_LENGTH 5
 #endif
+#ifndef WINHTTP_OPTION_RESOLVE_TIMEOUT
+#define WINHTTP_OPTION_RESOLVE_TIMEOUT 2
+#endif
+#ifndef WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT
+#define WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT 7
+#endif
+
+static DWORD wh_timeout_ms(void) {
+    const char *v = getenv("SQUIDGET_HTTP_TIMEOUT_MS");
+    if (v && v[0]) {
+        char *endp = NULL;
+        long n = strtol(v, &endp, 10);
+        if (endp != v && n >= 3000 && n <= 120000) return (DWORD)n;
+    }
+    return 10000;
+}
+
+static void wh_apply_timeouts(HINTERNET h, DWORD ms) {
+    if (!h) return;
+    WinHttpSetOption(h, WINHTTP_OPTION_RESOLVE_TIMEOUT, &ms, sizeof ms);
+    WinHttpSetOption(h, WINHTTP_OPTION_CONNECT_TIMEOUT, &ms, sizeof ms);
+    WinHttpSetOption(h, WINHTTP_OPTION_SEND_TIMEOUT, &ms, sizeof ms);
+    WinHttpSetOption(h, WINHTTP_OPTION_RECEIVE_TIMEOUT, &ms, sizeof ms);
+    WinHttpSetOption(h, WINHTTP_OPTION_RECEIVE_RESPONSE_TIMEOUT, &ms, sizeof ms);
+}
+
+static void wh_append_extra_info(wchar_t *path, size_t path_cap, const wchar_t *extra) {
+    if (!path || path_cap == 0 || !extra || !extra[0]) return;
+    size_t used = wcslen(path);
+    if (used + 1 >= path_cap) return;
+    wcsncat(path, extra, path_cap - used - 1);
+}
+
+static wchar_t *wh_build_headers(const char *content_type,
+                                 const char *const *headers, int nheaders) {
+    char tmp[4096];
+    size_t len = 0;
+    tmp[0] = '\0';
+
+    if (content_type && content_type[0]) {
+        int n = snprintf(tmp + len, sizeof tmp - len, "Content-Type: %s\r\n", content_type);
+        if (n > 0) len += (size_t)n < sizeof tmp - len ? (size_t)n : sizeof tmp - len - 1;
+    }
+    for (int i = 0; i < nheaders; i++) {
+        if (!headers || !headers[i] || !headers[i][0]) continue;
+        int n = snprintf(tmp + len, sizeof tmp - len, "%s\r\n", headers[i]);
+        if (n <= 0) continue;
+        if ((size_t)n >= sizeof tmp - len) {
+            len = sizeof tmp - 1;
+            break;
+        }
+        len += (size_t)n;
+    }
+
+    if (len == 0) return NULL;
+    int need = MultiByteToWideChar(CP_UTF8, 0, tmp, -1, NULL, 0);
+    if (need <= 0) return NULL;
+    wchar_t *w = malloc((size_t)need * sizeof *w);
+    if (!w) return NULL;
+    if (!MultiByteToWideChar(CP_UTF8, 0, tmp, -1, w, need)) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+void http_init(void) {
+    api_cache_init();
+}
+
+void http_cleanup(void) {
+    api_cache_cleanup();
+}
 
 static int wh_do(const char *url, Buf *body, FILE *fp, DWORD toms) {
     // large url buffer for stream URLs
     wchar_t wu[8192];
     if (!MultiByteToWideChar(CP_UTF8,0,url,-1,wu,(int)(sizeof(wu)/sizeof(*wu)))) return 0;
     URL_COMPONENTS uc; memset(&uc,0,sizeof uc); uc.dwStructSize=sizeof uc;
-    wchar_t whost[512]={0},wpath[8192]={0};
+    wchar_t whost[512]={0},wpath[8192]={0},wextra[2048]={0};
     uc.lpszHostName=whost; uc.dwHostNameLength=512;
     uc.lpszUrlPath=wpath;  uc.dwUrlPathLength=8192;
+    uc.lpszExtraInfo=wextra; uc.dwExtraInfoLength=2048;
     if (!WinHttpCrackUrl(wu,0,0,&uc)) return 0;
     if (!wpath[0]){wpath[0]=L'/';wpath[1]=0;}
+    wh_append_extra_info(wpath, sizeof(wpath)/sizeof(*wpath), wextra);
     HINTERNET hs=WinHttpOpen(L"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
     if (!hs) return 0;
-    WinHttpSetOption(hs,WINHTTP_OPTION_CONNECT_TIMEOUT,&toms,sizeof toms);
-    WinHttpSetOption(hs,WINHTTP_OPTION_RECEIVE_TIMEOUT,&toms,sizeof toms);
-    WinHttpSetOption(hs,WINHTTP_OPTION_SEND_TIMEOUT,   &toms,sizeof toms);
+    wh_apply_timeouts(hs, toms);
     HINTERNET hc=WinHttpConnect(hs,whost,uc.nPort,0);
     if (!hc){WinHttpCloseHandle(hs);return 0;}
     DWORD fl=(uc.nScheme==INTERNET_SCHEME_HTTPS)?WINHTTP_FLAG_SECURE:0;
     HINTERNET hr=WinHttpOpenRequest(hc,L"GET",wpath,NULL,
         WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,fl);
     if (!hr){WinHttpCloseHandle(hc);WinHttpCloseHandle(hs);return 0;}
+    wh_apply_timeouts(hr, toms);
     DWORD redir=WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(hr,WINHTTP_OPTION_REDIRECT_POLICY,&redir,sizeof redir);
     int status=0;
@@ -434,34 +541,43 @@ static int wh_do(const char *url, Buf *body, FILE *fp, DWORD toms) {
 }
 
 /* WinHTTP POST — separate from wh_do to keep GET path unchanged */
-static int wh_post(const char *url, const char *json_body, Buf *out_buf) {
-    wchar_t wu[4096];
+static int wh_post(const char *url, const char *post_body,
+                   const char *content_type,
+                   const char *const *headers, int nheaders,
+                   Buf *out_buf) {
+    wchar_t wu[8192];
     if (!MultiByteToWideChar(CP_UTF8,0,url,-1,wu,(int)(sizeof(wu)/sizeof(*wu)))) return 0;
     URL_COMPONENTS uc; memset(&uc,0,sizeof uc); uc.dwStructSize=sizeof uc;
-    wchar_t whost[512]={0},wpath[4096]={0};
+    wchar_t whost[512]={0},wpath[8192]={0},wextra[2048]={0};
     uc.lpszHostName=whost; uc.dwHostNameLength=512;
-    uc.lpszUrlPath=wpath;  uc.dwUrlPathLength=4096;
+    uc.lpszUrlPath=wpath;  uc.dwUrlPathLength=8192;
+    uc.lpszExtraInfo=wextra; uc.dwExtraInfoLength=2048;
     if (!WinHttpCrackUrl(wu,0,0,&uc)) return 0;
     if (!wpath[0]){wpath[0]=L'/';wpath[1]=0;}
-    DWORD toms=15000;
+    wh_append_extra_info(wpath, sizeof(wpath)/sizeof(*wpath), wextra);
+
+    DWORD toms=wh_timeout_ms();
     HINTERNET hs=WinHttpOpen(L"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
     if (!hs) return 0;
-    WinHttpSetOption(hs,WINHTTP_OPTION_CONNECT_TIMEOUT,&toms,sizeof toms);
-    WinHttpSetOption(hs,WINHTTP_OPTION_RECEIVE_TIMEOUT,&toms,sizeof toms);
+    wh_apply_timeouts(hs, toms);
     HINTERNET hc=WinHttpConnect(hs,whost,uc.nPort,0);
     if (!hc){WinHttpCloseHandle(hs);return 0;}
     DWORD fl=(uc.nScheme==INTERNET_SCHEME_HTTPS)?WINHTTP_FLAG_SECURE:0;
     HINTERNET hr=WinHttpOpenRequest(hc,L"POST",wpath,NULL,
         WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,fl);
     if (!hr){WinHttpCloseHandle(hc);WinHttpCloseHandle(hs);return 0;}
+    wh_apply_timeouts(hr, toms);
     DWORD redir=WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(hr,WINHTTP_OPTION_REDIRECT_POLICY,&redir,sizeof redir);
-    DWORD blen = json_body ? (DWORD)strlen(json_body) : 0;
+
+    wchar_t *wheaders = wh_build_headers(content_type, headers, nheaders);
+    DWORD hlen = wheaders ? (DWORD)-1L : 0;
+    DWORD blen = post_body ? (DWORD)strlen(post_body) : 0;
     int status=0;
     if (WinHttpSendRequest(hr,
-            L"Content-Type: application/json\r\n", (DWORD)-1L,
-            (void*)json_body, blen, blen, 0)
+            wheaders ? wheaders : WINHTTP_NO_ADDITIONAL_HEADERS, hlen,
+            (void*)post_body, blen, blen, 0)
         && WinHttpReceiveResponse(hr,NULL)) {
         DWORD s=0,sl=sizeof s;
         WinHttpQueryHeaders(hr,WINHTTP_QUERY_STATUS_CODE|WINHTTP_QUERY_FLAG_NUMBER,NULL,&s,&sl,NULL);
@@ -478,6 +594,7 @@ static int wh_post(const char *url, const char *json_body, Buf *out_buf) {
             }
         }
     }
+    if (wheaders) free(wheaders);
     WinHttpCloseHandle(hr);WinHttpCloseHandle(hc);WinHttpCloseHandle(hs);
     return status;
 }
@@ -488,7 +605,7 @@ char *http_get(const char *url) {
     // retry 3x with backoff — skip retry on 4xx client errors
     for (int i=0;i<3;i++) {
         b.len=0; b.buf[0]='\0';
-        int s=wh_do(url,&b,NULL,15000);
+        int s=wh_do(url,&b,NULL,wh_timeout_ms());
         if(s>=200&&s<400){res=b.buf;break;}
         if(s>=400&&s<500) break; /* client error — retrying won't help */
         if(i<2) sqt_sleep_ms(500*(i+1));
@@ -499,26 +616,28 @@ char *http_get(const char *url) {
 
 long http_get_file(const char *url, const char *path,
                     void (*progress_cb)(size_t received, size_t total, void *ud), void *ud) {
-    wchar_t wu[4096];
+    wchar_t wu[8192];
     if (!MultiByteToWideChar(CP_UTF8,0,url,-1,wu,(int)(sizeof(wu)/sizeof(*wu)))) return -1;
     URL_COMPONENTS uc; memset(&uc,0,sizeof uc); uc.dwStructSize=sizeof uc;
-    wchar_t whost[512]={0},wpath[4096]={0};
+    wchar_t whost[512]={0},wpath[8192]={0},wextra[2048]={0};
     uc.lpszHostName=whost; uc.dwHostNameLength=512;
-    uc.lpszUrlPath=wpath;  uc.dwUrlPathLength=4096;
+    uc.lpszUrlPath=wpath;  uc.dwUrlPathLength=8192;
+    uc.lpszExtraInfo=wextra; uc.dwExtraInfoLength=2048;
     if (!WinHttpCrackUrl(wu,0,0,&uc)) return -1;
     if (!wpath[0]){wpath[0]=L'/';wpath[1]=0;}
+    wh_append_extra_info(wpath, sizeof(wpath)/sizeof(*wpath), wextra);
     DWORD toms=60000;
     HINTERNET hs=WinHttpOpen(L"Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",WINHTTP_ACCESS_TYPE_DEFAULT_PROXY,
         WINHTTP_NO_PROXY_NAME,WINHTTP_NO_PROXY_BYPASS,0);
     if (!hs) return -1;
-    WinHttpSetOption(hs,WINHTTP_OPTION_CONNECT_TIMEOUT,&toms,sizeof toms);
-    WinHttpSetOption(hs,WINHTTP_OPTION_RECEIVE_TIMEOUT,&toms,sizeof toms);
+    wh_apply_timeouts(hs, toms);
     HINTERNET hc=WinHttpConnect(hs,whost,uc.nPort,0);
     if (!hc){WinHttpCloseHandle(hs);return -1;}
     DWORD fl=(uc.nScheme==INTERNET_SCHEME_HTTPS)?WINHTTP_FLAG_SECURE:0;
     HINTERNET hr=WinHttpOpenRequest(hc,L"GET",wpath,NULL,
         WINHTTP_NO_REFERER,WINHTTP_DEFAULT_ACCEPT_TYPES,fl);
     if (!hr){WinHttpCloseHandle(hc);WinHttpCloseHandle(hs);return -1;}
+    wh_apply_timeouts(hr, toms);
     DWORD redir=WINHTTP_OPTION_REDIRECT_POLICY_ALWAYS;
     WinHttpSetOption(hr,WINHTTP_OPTION_REDIRECT_POLICY,&redir,sizeof redir);
 
@@ -561,7 +680,7 @@ long http_get_file_ex(const char *url, const char *path,
 
 char *http_post(const char *url, const char *json_body) {
     Buf b={malloc(4096),0,4096}; if(!b.buf) return NULL;
-    int s=wh_post(url,json_body,&b);
+    int s=wh_post(url,json_body,"application/json",NULL,0,&b);
     if((s>=200&&s<400) || (s>=400 && b.len > 0)) return b.buf;
     free(b.buf); return NULL;
 }
@@ -569,8 +688,10 @@ char *http_post(const char *url, const char *json_body) {
 static char *http_post_custom(const char *url, const char *body,
                               const char *content_type,
                               const char *const *headers, int nheaders) {
-    (void)content_type; (void)headers; (void)nheaders;
-    return http_post(url, body);
+    Buf b={malloc(4096),0,4096}; if(!b.buf) return NULL;
+    int s=wh_post(url,body,content_type,headers,nheaders,&b);
+    if((s>=200&&s<400) || (s>=400 && b.len > 0)) return b.buf;
+    free(b.buf); return NULL;
 }
 
 // posix: libcurl (preferred) or curl cli fallback
@@ -815,10 +936,10 @@ char *api_get_lyrics(const char *isrc) {
     const char *synced = jstr(jobj_get(root, "syncedLyrics"));
     char *res = NULL;
     if (synced && *synced) {
-        res = strdup(synced);
+        res = sqt_strdup_cstr(synced);
     } else {
         const char *plain = jstr(jobj_get(root, "plainLyrics"));
-        if (plain && *plain) res = strdup(plain);
+        if (plain && *plain) res = sqt_strdup_cstr(plain);
     }
     json_free(root);
     return res;
@@ -1408,7 +1529,7 @@ static int extract_spotify_visible_lines(const char *html, Playlist *pl, Track *
     char *lines[2048];
     int nlines = 0;
     char *save = NULL;
-    for (char *line = strtok_r(txt, "\n", &save); line && nlines < (int)(sizeof(lines) / sizeof(lines[0])); line = strtok_r(NULL, "\n", &save)) {
+    for (char *line = sqt_strtok_r(txt, "\n", &save); line && nlines < (int)(sizeof(lines) / sizeof(lines[0])); line = sqt_strtok_r(NULL, "\n", &save)) {
         trim_in_place(line);
         if (!line[0]) continue;
         if (line_is_noise(line) && parse_duration_line(line) <= 0) continue;

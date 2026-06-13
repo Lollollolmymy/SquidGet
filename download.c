@@ -10,6 +10,7 @@
 #include <errno.h>
 #ifdef _WIN32
 #  include <io.h>
+#  include <sys/stat.h>
 #  include <windows.h>
 #  define access(p,m) _access(p,m)
 #else
@@ -100,8 +101,13 @@ static void dl_debug_file_head(const char *path) {
 
 static long long dl_file_size(const char *path) {
 #ifdef _WIN32
-    struct _stat st;
-    if (_stat(path, &st) == 0) return (long long)st.st_size;
+    WIN32_FILE_ATTRIBUTE_DATA attr;
+    if (GetFileAttributesExA(path, GetFileExInfoStandard, &attr)) {
+        ULARGE_INTEGER sz;
+        sz.HighPart = attr.nFileSizeHigh;
+        sz.LowPart = attr.nFileSizeLow;
+        return (long long)sz.QuadPart;
+    }
 #else
     struct stat st;
     if (stat(path, &st) == 0) return (long long)st.st_size;
